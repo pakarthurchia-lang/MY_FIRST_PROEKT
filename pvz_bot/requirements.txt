@@ -1,0 +1,7 @@
+aiogram==3.13.0
+playwright
+apscheduler
+aiosqlite
+python-dotenv
+aiofiles~=23.2.1
+anthropic

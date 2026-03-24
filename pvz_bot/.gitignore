@@ -1,0 +1,24 @@
+# Секреты и сессии
+.env
+data/ozon_token.json
+data/ozon_session.json
+data/pvz_bot.db
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Debug файлы
+debug_*.png
+debug_*.py
+
+# macOS
+.DS_Store
+
+# Логи
+*.log
+nohup.out
