@@ -13,10 +13,10 @@
 """
 
 import io
-from typing import Dict
+from typing import Dict, Optional
 
 
-def _find_col(row_lower: list, *keywords) -> int | None:
+def _find_col(row_lower: list, *keywords) -> Optional[int]:
     """Ищет индекс первого столбца, содержащего все ключевые слова."""
     for i, cell in enumerate(row_lower):
         if all(kw in cell for kw in keywords):
@@ -102,6 +102,120 @@ def parse_ym_turnover(file_bytes: bytes) -> Dict[str, float]:
         except (ValueError, TypeError):
             continue
         result[pvz_name] = result.get(pvz_name, 0.0) + cost
+
+    return result
+
+
+def parse_ym_fines(file_bytes: bytes, month: int = None, year: int = None) -> Dict[str, dict]:
+    """
+    Парсит лист «Баллы подлежащие вычету» XLSX Яндекс Маркет.
+    1 балл = 1 рубль.
+
+    Возвращает {pvz_name: {"total": float, "items": [{"date", "reason", "amount"}]}}
+    Если month/year заданы — фильтрует по дате применения.
+    """
+    import openpyxl
+    from datetime import datetime
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+
+    # Ищем лист с баллами/штрафами
+    ws = None
+    for name in wb.sheetnames:
+        nl = name.lower()
+        if "балл" in nl or "вычет" in nl or "штраф" in nl or "penalty" in nl or "fine" in nl:
+            ws = wb[name]
+            break
+    if ws is None:
+        return {}
+
+    # Находим заголовки
+    col_pvz_name = None
+    col_date = None
+    col_reason = None
+    col_amount = None
+    header_row_idx = None
+
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
+        if not row:
+            continue
+        row_lower = [str(c).lower().strip() if c is not None else "" for c in row]
+        for j, cell in enumerate(row_lower):
+            if "назван" in cell and col_pvz_name is None:
+                col_pvz_name = j
+            if (cell.startswith("дата") or cell == "date") and col_date is None:
+                col_date = j
+            if ("качеств" in cell or "причин" in cell or "reason" in cell) and col_reason is None and j != col_date:
+                col_reason = j
+            if ("сумм" in cell or "балл" in cell or "amount" in cell) and col_amount is None:
+                col_amount = j
+        if col_pvz_name is not None and col_amount is not None:
+            header_row_idx = i
+            break
+
+    if col_pvz_name is None:
+        col_pvz_name = 1
+    if col_date is None:
+        col_date = 2
+    if col_reason is None:
+        col_reason = 3
+    if col_amount is None:
+        col_amount = 4
+
+    result: Dict[str, dict] = {}
+    data_start = (header_row_idx + 1) if header_row_idx else 2
+
+    for row in ws.iter_rows(min_row=data_start, values_only=True):
+        if not row or len(row) <= max(col_pvz_name, col_amount):
+            continue
+
+        pvz_name = row[col_pvz_name]
+        if not pvz_name:
+            continue
+        pvz_name = str(pvz_name).strip()
+
+        # Фильтрация по месяцу/году
+        if month and year and col_date is not None and col_date < len(row):
+            raw_date = row[col_date]
+            try:
+                if isinstance(raw_date, str):
+                    dt = datetime.strptime(raw_date[:10], "%Y-%m-%d")
+                elif hasattr(raw_date, "month"):
+                    dt = raw_date
+                else:
+                    dt = None
+                if dt and (dt.month != month or dt.year != year):
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            amount = float(row[col_amount]) if row[col_amount] is not None else 0.0
+        except (ValueError, TypeError):
+            continue
+
+        if amount == 0:
+            continue
+
+        reason = ""
+        if col_reason is not None and col_reason < len(row) and row[col_reason]:
+            reason = str(row[col_reason]).strip()
+
+        date_str = ""
+        if col_date is not None and col_date < len(row) and row[col_date]:
+            raw = row[col_date]
+            try:
+                if isinstance(raw, str):
+                    date_str = raw[:10]
+                elif hasattr(raw, "strftime"):
+                    date_str = raw.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        if pvz_name not in result:
+            result[pvz_name] = {"total": 0.0, "items": []}
+        result[pvz_name]["total"] += amount
+        result[pvz_name]["items"].append({"date": date_str, "reason": reason, "amount": amount})
 
     return result
 
