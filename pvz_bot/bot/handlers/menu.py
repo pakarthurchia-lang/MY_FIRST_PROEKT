@@ -5,10 +5,9 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from config import OWNER_CHAT_ID
-from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports, _get_all_stores
+from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports
 from yandex.reports import available_months_for_menu as ym_available_months
 from ozon.analytics import get_all_pvz_analytics
-from ozon.ai_audit import get_pvz_audit
 from bot.handlers.claims import format_claim
 
 router = Router()
@@ -25,9 +24,6 @@ def main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📊 Статистика", callback_data="menu:stats"),
-            InlineKeyboardButton(text="📝 Оборот", callback_data="menu:turnover"),
-        ],
-        [
             InlineKeyboardButton(text="🤖 Аналитика", callback_data="menu:analytics"),
         ],
     ])
@@ -221,11 +217,9 @@ async def cb_analytics(call: CallbackQuery):
         return
 
     from datetime import date, timedelta
-    from db.database import get_turnover
     today = date.today()
     week_start = (today - timedelta(days=6)).strftime("%-d %b").lower()
     week_end = today.strftime("%-d %b").lower()
-    cur_month, cur_year = today.month, today.year
 
     if not pvz_list:
         await call.message.answer("⚠️ Список ПВЗ пуст — не удалось получить данные.", reply_markup=main_menu())
@@ -269,16 +263,8 @@ async def cb_analytics(call: CallbackQuery):
         else:
             rating_str = "—"
 
-        # Товарооборот
-        turnover_val = await get_turnover(name, cur_month, cur_year)
-        if turnover_val:
-            turnover_str = f"{turnover_val:,.2f} руб."
-        else:
-            turnover_str = "⚠️ не введён  →  нажми <b>📝 Оборот</b>"
-
         text += (
             f"\n\n🏪 <b>{name}</b>\n"
-            f"💼 Товарооборот: {turnover_str}\n"
             f"📦 Принято за неделю: {received_str}\n"
             f"👥 Уникальных клиентов: {clients_str}\n"
             f"🔁 Частота заказов: {freq_str}\n"
@@ -286,53 +272,6 @@ async def cb_analytics(call: CallbackQuery):
         )
 
     await call.message.answer(text, parse_mode="HTML", reply_markup=main_menu())
-
-
-# ── Аналитика (ИИ-аудит) — выбор ПВЗ ──────────────────────────────────────
-
-@router.callback_query(F.data == "menu:analytics")
-async def cb_analytics_pick_pvz(call: CallbackQuery):
-    if call.from_user.id != OWNER_CHAT_ID:
-        return
-    await call.answer()
-
-    stores = await _get_all_stores()
-    buttons = [
-        [InlineKeyboardButton(text=f"🏪 {s['name']}", callback_data=f"audit_pvz:{s['id']}")]
-        for s in stores
-    ]
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
-
-    await call.message.answer(
-        "🤖 <b>ИИ-аналитика ПВЗ</b>\n\nВыбери точку для аудита:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML",
-    )
-
-
-@router.callback_query(F.data.startswith("audit_pvz:"))
-async def cb_audit_pvz(call: CallbackQuery):
-    if call.from_user.id != OWNER_CHAT_ID:
-        return
-    await call.answer()
-
-    store_id = int(call.data.split(":")[1])
-    stores = await _get_all_stores()
-    store_name = next((s["name"] for s in stores if s["id"] == store_id), str(store_id))
-
-    await call.message.answer(f"🤖 Собираю данные и готовлю аудит <b>{store_name}</b>...", parse_mode="HTML")
-
-    try:
-        audit_text = await get_pvz_audit(store_id, store_name)
-    except Exception as e:
-        await call.message.answer(f"❌ Ошибка при генерации аудита: {e}", reply_markup=main_menu())
-        return
-
-    await call.message.answer(
-        f"🤖 <b>Аудит ПВЗ: {store_name}</b>\n\n{audit_text}",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-    )
 
 
 # ── Назад ──────────────────────────────────────────────────────────────────

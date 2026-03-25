@@ -5,102 +5,227 @@ import os
 import anthropic
 from datetime import date
 
-from ozon.analytics import get_store_analytics
-from ozon.scraper import get_available_reports, get_monthly_stats
-from db.database import get_turnover
 
+async def get_pvz_audit(location: dict, expenses: dict) -> str:
+    """
+    Собирает данные по локации и генерирует аудит через Claude.
 
-async def get_pvz_audit(store_id: int, store_name: str) -> str:
-    """Собирает данные по ПВЗ и генерирует аудит через Claude."""
+    location = get_location_with_pvzs(...) результат:
+        {id, name, pvzs: [{platform, pvz_id, pvz_name}]}
 
-    # 1. Аналитика за текущую неделю
-    analytics = await get_store_analytics(store_id, store_name)
+    expenses = {"rent": float, "salary": float, "utilities": float, "turnover": float}
+    """
+    from ozon.scraper import get_available_reports, get_monthly_stats
+    from ozon.analytics import get_store_analytics
 
-    # 2. Финансы за последние доступные месяцы (до 6)
-    profit_data = []
+    ozon_pvzs = [p for p in location["pvzs"] if p["platform"] == "ozon"]
+    ym_pvzs = [p for p in location["pvzs"] if p["platform"] == "ym"]
+
+    # ── Ozon данные ────────────────────────────────────────────────────────
+    ozon_profit_data: dict[str, list] = {}  # pvz_name -> list of monthly dicts
+    ozon_analytics: dict[str, dict] = {}   # pvz_name -> analytics dict
     reports_total = 0
-    try:
-        reports = await get_available_reports()
-        reports_total = len(reports)  # для оценки возраста ПВЗ
-        for r in reports[:6]:
+
+    if ozon_pvzs:
+        try:
+            reports = await get_available_reports()
+            reports_total = len(reports)
+            for r in reports[:6]:
+                try:
+                    stats = await get_monthly_stats(month=r["month"], year=r["year"])
+                    for pvz in ozon_pvzs:
+                        name = pvz["pvz_name"]
+                        pvz_rev = stats.get("pvz_revenue", {}).get(name)
+                        if pvz_rev:
+                            tax = round(pvz_rev * stats["tax_rate"], 2)
+                            fines = stats.get("fines_by_pvz", {}).get(name, 0)
+                            profit = round(pvz_rev - tax - fines, 2)
+                            ozon_profit_data.setdefault(name, []).append({
+                                "period": r["label"],
+                                "revenue": pvz_rev,
+                                "tax": tax,
+                                "fines": fines,
+                                "profit": profit,
+                            })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        for pvz in ozon_pvzs:
             try:
-                stats = await get_monthly_stats(month=r["month"], year=r["year"])
-                pvz_rev = stats.get("pvz_revenue", {}).get(store_name)
-                if pvz_rev:
-                    tax = round(pvz_rev * stats["tax_rate"], 2)
-                    fines = stats.get("fines_by_pvz", {}).get(store_name, 0)
-                    profit = round(pvz_rev - tax - fines, 2)
-                    profit_data.append({
-                        "period": r["label"],
-                        "revenue": pvz_rev,
-                        "tax": tax,
-                        "fines": fines,
-                        "profit": profit,
-                    })
+                store_id = int(pvz["pvz_id"]) if pvz.get("pvz_id") else None
+                if store_id:
+                    analytics = await get_store_analytics(store_id, pvz["pvz_name"])
+                    ozon_analytics[pvz["pvz_name"]] = analytics
             except Exception:
                 pass
-    except Exception:
-        pass
 
-    # 3. Оборот из БД (текущий месяц)
-    today = date.today()
-    turnover = await get_turnover(store_name, today.month, today.year)
+    # ── Яндекс Маркет данные ───────────────────────────────────────────────
+    ym_revenue_data: dict[str, list] = {}   # pvz_name -> list of monthly dicts
+    ym_turnover_data: dict[str, list] = {}  # pvz_name -> list of monthly dicts
 
-    # 4. Формируем промпт и вызываем Claude
-    prompt = _build_prompt(store_name, analytics, profit_data, turnover, reports_total)
+    if ym_pvzs:
+        try:
+            from yandex.reports import download_report_xlsx, available_months_for_menu
+            from yandex.xlsx_parser import parse_ym_xlsx, parse_ym_turnover
+
+            months = available_months_for_menu(3)
+            for m in months:
+                try:
+                    xlsx_bytes = await download_report_xlsx(m["month"], m["year"])
+                    ym_data = parse_ym_xlsx(xlsx_bytes)
+                    ym_turn = parse_ym_turnover(xlsx_bytes)
+                    for pvz in ym_pvzs:
+                        name = pvz["pvz_name"]
+                        rev = ym_data.get(name)
+                        if rev is not None:
+                            ym_revenue_data.setdefault(name, []).append({
+                                "period": m["label"],
+                                "revenue": rev,
+                            })
+                        turn = ym_turn.get(name)
+                        if turn is not None:
+                            ym_turnover_data.setdefault(name, []).append({
+                                "period": m["label"],
+                                "turnover": turn,
+                            })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # ── Строим промпт ──────────────────────────────────────────────────────
+    prompt = _build_prompt(
+        location=location,
+        expenses=expenses,
+        ozon_profit_data=ozon_profit_data,
+        ozon_analytics=ozon_analytics,
+        ym_revenue_data=ym_revenue_data,
+        ym_turnover_data=ym_turnover_data,
+        reports_total=reports_total,
+    )
 
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     message = await client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=700,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text
 
 
-def _build_prompt(store_name: str, analytics: dict, profit_data: list, turnover, reports_total: int) -> str:
-    # Финансовый тренд
-    trend = ""
-    if len(profit_data) >= 2:
-        diff = profit_data[0]["profit"] - profit_data[-1]["profit"]
-        trend = f"рост +{diff:,.0f} руб." if diff > 0 else f"падение {diff:,.0f} руб."
-
-    # Возраст ПВЗ (примерно по числу месяцев отчётов)
-    age_str = f"~{reports_total} мес." if reports_total else "неизвестен"
-
+def _build_prompt(
+    location: dict,
+    expenses: dict,
+    ozon_profit_data: dict,
+    ozon_analytics: dict,
+    ym_revenue_data: dict,
+    ym_turnover_data: dict,
+    reports_total: int,
+) -> str:
     lines = [
-        "Ты эксперт по оценке бизнеса. Дай краткий аудит ПВЗ Ozon для принятия решения о покупке или продаже.",
-        f"ПВЗ: {store_name} | Возраст в системе: {age_str}",
+        "Ты эксперт по оценке бизнеса. Дай краткий аудит локации ПВЗ для принятия решения о покупке или продаже.",
+        f"Локация: {location['name']}",
+        f"Возраст в системе: ~{reports_total} мес." if reports_total else "Возраст: неизвестен",
         "",
-        "ДАННЫЕ:",
+        "ДАННЫЕ ПО ПВЗ:",
     ]
 
-    # Финансы
-    if profit_data:
-        lines.append("Вознаграждение Ozon (после налогов и штрафов) по месяцам:")
-        for p in profit_data:
-            lines.append(f"  {p['period']}: {p['revenue']:,.0f} → чистая {p['profit']:,.0f} руб. (штрафы: {p['fines']:,.0f})")
-        if trend:
-            lines.append(f"Тренд: {trend}")
+    # Ozon финансы
+    if ozon_profit_data:
+        lines.append("\nOzon — финансы по месяцам:")
+        for pvz_name, months in ozon_profit_data.items():
+            lines.append(f"  ПВЗ: {pvz_name}")
+            for p in months:
+                lines.append(
+                    f"    {p['period']}: выручка {p['revenue']:,.0f} → чистая {p['profit']:,.0f} руб."
+                    f" (налог: {p['tax']:,.0f}, штрафы: {p['fines']:,.0f})"
+                )
+            if len(months) >= 2:
+                diff = months[0]["profit"] - months[-1]["profit"]
+                trend = f"рост +{diff:,.0f} руб." if diff > 0 else f"падение {diff:,.0f} руб."
+                lines.append(f"    Тренд: {trend}")
 
-    if turnover:
-        lines.append(f"Товарооборот тек. месяц: {turnover:,.0f} руб.")
+    # Ozon трафик
+    if ozon_analytics:
+        lines.append("\nOzon — трафик (за неделю):")
+        for pvz_name, a in ozon_analytics.items():
+            lines.append(
+                f"  {pvz_name}: выдач {a.get('received_total', '—')}, "
+                f"клиентов {a.get('unique_clients_last', '—')} (пред.: {a.get('unique_clients_prev', '—')}), "
+                f"частота {a.get('frequency', '—')} (регион: {a.get('frequency_region', '—')}), "
+                f"рейтинг {a.get('rating', '—')}"
+            )
 
-    # Трафик
+    # ЯМ финансы
+    if ym_revenue_data:
+        lines.append("\nЯндекс Маркет — вознаграждение по месяцам:")
+        for pvz_name, months in ym_revenue_data.items():
+            lines.append(f"  ПВЗ: {pvz_name}")
+            for p in months:
+                lines.append(f"    {p['period']}: {p['revenue']:,.0f} руб.")
+            if len(months) >= 2:
+                diff = months[0]["revenue"] - months[-1]["revenue"]
+                trend = f"рост +{diff:,.0f} руб." if diff > 0 else f"падение {diff:,.0f} руб."
+                lines.append(f"    Тренд: {trend}")
+
+    if ym_turnover_data:
+        lines.append("\nЯндекс Маркет — оборот по месяцам:")
+        for pvz_name, months in ym_turnover_data.items():
+            lines.append(f"  ПВЗ: {pvz_name}")
+            for p in months:
+                lines.append(f"    {p['period']}: {p['turnover']:,.0f} руб.")
+
+    # Расходы
+    rent = expenses.get("rent", 0)
+    salary = expenses.get("salary", 0)
+    utilities = expenses.get("utilities", 0)
+    turnover = expenses.get("turnover", 0)
+    total_expenses = rent + salary + utilities
+
     lines += [
-        f"Выдач за неделю: {analytics.get('received_total', '—')} шт.",
-        f"Уникальных клиентов: {analytics.get('unique_clients_last', '—')} (пред.: {analytics.get('unique_clients_prev', '—')})",
-        f"Частота заказов: {analytics.get('frequency', '—')} (регион: {analytics.get('frequency_region', '—')})",
-        f"Рейтинг: {analytics.get('rating', '—')} (δ {analytics.get('rating_delta', '—')})",
         "",
-        "ВАЖНО: данные о расходах (аренда, ФОТ, коммуналка), конкурентах рядом и локации НЕ предоставлены.",
+        "РАСХОДЫ:",
+        f"  Аренда: {rent:,.0f} руб./мес.",
+        f"  ФОТ: {salary:,.0f} руб./мес.",
+        f"  Коммуналка: {utilities:,.0f} руб./мес.",
+        f"  Товарооборот: {turnover:,.0f} руб./мес.",
+        f"  Итого расходов: {total_expenses:,.0f} руб./мес.",
+    ]
+
+    # Расчёт чистой прибыли
+    total_ozon_revenue = sum(
+        months[0]["revenue"] for months in ozon_profit_data.values() if months
+    )
+    total_ozon_tax = sum(
+        months[0]["tax"] for months in ozon_profit_data.values() if months
+    )
+    total_ozon_fines = sum(
+        months[0]["fines"] for months in ozon_profit_data.values() if months
+    )
+    total_ym_revenue = sum(
+        months[0]["revenue"] for months in ym_revenue_data.values() if months
+    )
+    total_gross = total_ozon_revenue + total_ym_revenue
+    total_deductions = total_ozon_tax + total_ozon_fines
+    net_profit = total_gross - total_deductions - total_expenses
+
+    lines += [
         "",
-        "ФОРМАТ ОТВЕТА (строго, без воды, до 200 слов):",
-        "🎯 Вердикт: [одно предложение — покупать / держать / продавать и почему]",
-        "💰 Финансы: [оценка доходности, тренд, риск штрафов]",
-        "📦 Трафик: [оценка потока, сравнение с регионом]",
-        "⚠️ Что проверить до сделки: [конкретный список — конкуренты, аренда, ФОТ, возраст и т.д.]",
-        "💵 Справедливая цена: [оценочный диапазон = N × месячная прибыль, где N обоснуй]",
+        "РАСЧЁТ (последний месяц):",
+        f"  Суммарная выручка (Ozon + ЯМ): {total_gross:,.0f} руб.",
+        f"  Налоги: -{total_ozon_tax:,.0f} руб.",
+        f"  Штрафы/претензии: -{total_ozon_fines:,.0f} руб.",
+        f"  Расходы: -{total_expenses:,.0f} руб.",
+        f"  Чистая прибыль: {net_profit:,.0f} руб.",
+        "",
+        "ФОРМАТ ОТВЕТА (строго, без воды, до 250 слов):",
+        "🎯 Вердикт: [держать / развивать / продавать и почему]",
+        "💰 Финансы: [доходность, рентабельность с учётом расходов, тренд]",
+        "📦 Трафик: [поток, сравнение с регионом]",
+        "⚠️ Риски: [конкретный список]",
+        "💵 Оценка бизнеса: [N × месячная чистая прибыль, где N обоснуй]",
     ]
 
     return "\n".join(lines)

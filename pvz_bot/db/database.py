@@ -41,7 +41,90 @@ async def init_db():
                 UNIQUE(pvz, month, year)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS locations (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS location_pvz (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+                platform    TEXT NOT NULL,
+                pvz_id      TEXT,
+                pvz_name    TEXT NOT NULL
+            )
+        """)
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.commit()
+
+
+async def create_location(name: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cursor = await db.execute("INSERT INTO locations (name) VALUES (?)", (name,))
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_all_locations() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, name FROM locations ORDER BY id") as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_location(location_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, name FROM locations WHERE id=?", (location_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def update_location_name(location_id: int, name: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE locations SET name=? WHERE id=?", (name, location_id))
+        await db.commit()
+
+
+async def delete_location(location_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute("DELETE FROM locations WHERE id=?", (location_id,))
+        await db.commit()
+
+
+async def get_location_pvzs(location_id: int) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, location_id, platform, pvz_id, pvz_name FROM location_pvz WHERE location_id=? ORDER BY id",
+            (location_id,)
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_location_pvzs(location_id: int, pvzs: list) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute("DELETE FROM location_pvz WHERE location_id=?", (location_id,))
+        for pvz in pvzs:
+            await db.execute(
+                "INSERT INTO location_pvz (location_id, platform, pvz_id, pvz_name) VALUES (?, ?, ?, ?)",
+                (location_id, pvz["platform"], pvz.get("pvz_id"), pvz["pvz_name"])
+            )
+        await db.commit()
+
+
+async def get_location_with_pvzs(location_id: int) -> Optional[dict]:
+    loc = await get_location(location_id)
+    if loc is None:
+        return None
+    pvzs = await get_location_pvzs(location_id)
+    loc["pvzs"] = [{"platform": p["platform"], "pvz_id": p["pvz_id"], "pvz_name": p["pvz_name"]} for p in pvzs]
+    return loc
 
 
 async def upsert_turnover(pvz: str, month: int, year: int, amount: float):

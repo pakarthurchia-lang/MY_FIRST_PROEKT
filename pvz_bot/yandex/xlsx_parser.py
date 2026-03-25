@@ -5,10 +5,105 @@
   Столбцы: ID ПВЗ | Название Г | Услуга | Сумма
   Строки: по одной позиции на каждую услугу/ПВЗ
   Сумма может быть положительной (выплата) или отрицательной (удержание).
+
+Раздел транзакций (отдельный лист):
+  Столбцы: ID ПВЗ | Название Г | Услуга | Время | Заказ/Воз | Товар |
+           Стоимость заказа за 1шт | ... | Количество | Тип оплаты | Стоимость | Тариф | ...
+  Стоимость — тариф за каждую посылку (оборот ПВЗ).
 """
 
 import io
 from typing import Dict
+
+
+def _find_col(row_lower: list, *keywords) -> int | None:
+    """Ищет индекс первого столбца, содержащего все ключевые слова."""
+    for i, cell in enumerate(row_lower):
+        if all(kw in cell for kw in keywords):
+            return i
+    return None
+
+
+def parse_ym_turnover(file_bytes: bytes) -> Dict[str, float]:
+    """
+    Парсит лист транзакций XLSX Яндекс Маркет.
+    Возвращает {pvz_name: сумма_по_колонке_Стоимость} — оборот по каждому ПВЗ.
+    """
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+
+    # Ищем лист транзакций
+    ws = None
+    for name in wb.sheetnames:
+        nl = name.lower()
+        if "транзакц" in nl or "transaction" in nl or "детал" in nl:
+            ws = wb[name]
+            break
+    # Если не нашли по имени — ищем лист с колонками "название" + "стоимость"
+    if ws is None:
+        for name in wb.sheetnames:
+            sheet = wb[name]
+            for row in sheet.iter_rows(min_row=1, max_row=5, values_only=True):
+                row_lower = [str(c).lower().strip() if c else "" for c in row]
+                if _find_col(row_lower, "назван") is not None and _find_col(row_lower, "стоимост") is not None:
+                    ws = sheet
+                    break
+            if ws is not None:
+                break
+    if ws is None:
+        ws = wb.active
+
+    # Находим заголовки
+    col_pvz_name = None
+    col_cost = None
+    header_row_idx = None
+
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
+        if row is None:
+            continue
+        row_lower = [str(c).lower().strip() if c is not None else "" for c in row]
+        pvz_col = _find_col(row_lower, "назван")
+        # Ищем "Стоимость" — но НЕ "стоимость заказа" (это цена товара, не тариф)
+        cost_col = None
+        for j, cell in enumerate(row_lower):
+            if cell == "стоимость":  # точное совпадение — тариф за посылку
+                cost_col = j
+                break
+        if cost_col is None:
+            for j, cell in enumerate(row_lower):
+                if "стоимост" in cell and "заказ" not in cell and "товар" not in cell and "ндс" not in cell:
+                    cost_col = j
+                    break
+        if pvz_col is not None and cost_col is not None:
+            col_pvz_name = pvz_col
+            col_cost = cost_col
+            header_row_idx = i
+            break
+
+    if col_pvz_name is None:
+        col_pvz_name = 1  # фолбэк: Название Г
+    if col_cost is None:
+        col_cost = 10     # фолбэк: 11-я колонка
+
+    result: Dict[str, float] = {}
+    data_start = (header_row_idx + 1) if header_row_idx else 2
+
+    for row in ws.iter_rows(min_row=data_start, values_only=True):
+        if row is None or len(row) <= max(col_pvz_name, col_cost):
+            continue
+        pvz_name = row[col_pvz_name]
+        cost = row[col_cost]
+        if not pvz_name:
+            continue
+        pvz_name = str(pvz_name).strip()
+        try:
+            cost = float(cost) if cost is not None else 0.0
+        except (ValueError, TypeError):
+            continue
+        result[pvz_name] = result.get(pvz_name, 0.0) + cost
+
+    return result
 
 
 def parse_ym_xlsx(file_bytes: bytes) -> Dict[str, float]:

@@ -2,7 +2,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from bot.handlers import auth, claims, menu, turnover, ym_upload
+from bot.handlers import auth, claims, menu, ym_upload, audit, location_setup
 from db.database import init_db
 from scheduler.jobs import setup_scheduler
 from config import BOT_TOKEN, OWNER_CHAT_ID
@@ -21,7 +21,8 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.include_router(menu.router)
-    dp.include_router(turnover.router)
+    dp.include_router(location_setup.router)
+    dp.include_router(audit.router)
     dp.include_router(ym_upload.router)
     dp.include_router(auth.router)
     dp.include_router(claims.router)
