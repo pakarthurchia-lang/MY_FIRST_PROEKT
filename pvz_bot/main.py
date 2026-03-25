@@ -2,7 +2,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from bot.handlers import auth, claims, menu, turnover
+from bot.handlers import auth, claims, menu, turnover, ym_upload
 from db.database import init_db
 from scheduler.jobs import setup_scheduler
 from config import BOT_TOKEN, OWNER_CHAT_ID
@@ -22,6 +22,7 @@ async def main():
 
     dp.include_router(menu.router)
     dp.include_router(turnover.router)
+    dp.include_router(ym_upload.router)
     dp.include_router(auth.router)
     dp.include_router(claims.router)
 

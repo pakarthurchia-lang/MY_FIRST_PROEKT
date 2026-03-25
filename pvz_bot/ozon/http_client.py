@@ -77,32 +77,67 @@ async def _refresh_access_token(token_data: dict) -> dict:
     return new_token
 
 
+def _is_token_expired(token_data: dict, margin_sec: int = 300) -> bool:
+    """Возвращает True если access_token истёк или истекает через margin_sec секунд."""
+    if not token_data or not token_data.get("access_token"):
+        return True
+    exp = token_data.get("expire_time", 0)
+    if exp > 1e12:
+        exp /= 1000
+    return time.time() >= exp - margin_sec
+
+
 async def get_access_token() -> str:
-    """Возвращает актуальный Bearer токен, при необходимости читает из Safari."""
+    """Возвращает актуальный Bearer токен.
+
+    Порядок обновления:
+    1. Если токен ещё живой — возвращаем его.
+    2. Пробуем прочитать свежий токен из браузера (Safari).
+    3. Если не вышло — обновляем через refresh_token (API).
+    4. Если и это не вышло — кидаем ошибку (нужно обновить вручную).
+    """
     global _token_data
 
     if not _token_data:
         _token_data = _load_token()
 
-    # Проверяем не истёк ли токен (с запасом 5 минут)
-    expire_time = _token_data.get("expire_time", 0) if _token_data else 0
-    if expire_time > 1e12:
-        expire_time /= 1000
+    if not _is_token_expired(_token_data):
+        return _token_data["access_token"]
 
-    now = time.time()
-    if not _token_data or expire_time - now < 300:
-        print("Токен истекает, читаю из Safari...")
+    # Шаг 1: пробуем браузер
+    try:
+        from ozon.safari_token import update_token_from_safari
+        _token_data = update_token_from_safari()
+        print("✅ Токен обновлён из браузера автоматически")
+        return _token_data["access_token"]
+    except Exception:
+        pass
+
+    # Шаг 2: обновляем через refresh_token
+    if _token_data and _token_data.get("refresh_token"):
         try:
-            from ozon.safari_token import update_token_from_safari
-            _token_data = update_token_from_safari()
-            print("✅ Токен обновлён из Safari автоматически")
+            _token_data = await _refresh_access_token(_token_data)
+            print("✅ Токен обновлён через refresh_token")
+            return _token_data["access_token"]
         except Exception as e:
-            if not _token_data or not _token_data.get("access_token"):
-                raise RuntimeError(
-                    f"Не удалось обновить токен из Safari: {e}\n"
-                    "Убедись что Safari открыт и ты залогинен на turbo-pvz.ozon.ru"
-                )
+            raise RuntimeError(
+                f"Токен истёк, refresh_token тоже не сработал: {e}\n"
+                "Скопируй новый токен из браузера через localStorage.getItem('pvz-access-token')"
+            )
 
+    raise RuntimeError(
+        "Токен истёк и нет refresh_token.\n"
+        "Скопируй новый токен из браузера через localStorage.getItem('pvz-access-token')"
+    )
+
+
+_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+async def _force_refresh_token():
+    """Принудительно обновляет токен через refresh_token и возвращает новый access_token."""
+    global _token_data
+    _token_data = await _refresh_access_token(_token_data)
     return _token_data["access_token"]
 
 
@@ -110,16 +145,12 @@ async def post(url: str, body: dict) -> dict:
     """POST запрос к Ozon API с авторизацией."""
     token = await get_access_token()
     cookies = _get_cookies()
-
     headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
 
-    async with aiohttp.ClientSession(cookies=cookies) as session:
+    async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session:
         async with session.post(url, json=body, headers=headers) as resp:
             if resp.status == 401:
-                # Принудительно обновляем токен и пробуем ещё раз
-                global _token_data
-                _token_data = await _refresh_access_token(_token_data)
-                token = _token_data["access_token"]
+                token = await _force_refresh_token()
                 headers["Authorization"] = f"Bearer {token}"
                 async with session.post(url, json=body, headers=headers) as resp2:
                     return await resp2.json()
@@ -128,18 +159,38 @@ async def post(url: str, body: dict) -> dict:
 
 async def get(url: str, params: dict = None) -> dict:
     """GET запрос к Ozon API с авторизацией."""
-    global _token_data
     token = await get_access_token()
     cookies = _get_cookies()
-
     headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
 
-    async with aiohttp.ClientSession(cookies=cookies) as session:
+    async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session:
         async with session.get(url, params=params, headers=headers) as resp:
             if resp.status == 401:
-                _token_data = await _refresh_access_token(_token_data)
-                token = _token_data["access_token"]
+                token = await _force_refresh_token()
                 headers["Authorization"] = f"Bearer {token}"
                 async with session.get(url, params=params, headers=headers) as resp2:
                     return await resp2.json()
             return await resp.json()
+
+
+async def get_bytes(url: str) -> bytes:
+    """GET запрос возвращающий bytes (для PDF). С 401-retry и таймаутом."""
+    token = await get_access_token()
+    cookies = _get_cookies()
+    headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
+    timeout = aiohttp.ClientTimeout(total=60)  # PDF может быть большим
+
+    async with aiohttp.ClientSession(cookies=cookies, timeout=timeout) as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 401:
+                token = await _force_refresh_token()
+                headers["Authorization"] = f"Bearer {token}"
+                async with session.get(url, headers=headers) as resp2:
+                    if resp2.status != 200:
+                        text = await resp2.text()
+                        raise RuntimeError(f"Ошибка скачивания: {resp2.status} {text[:200]}")
+                    return await resp2.read()
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"Ошибка скачивания: {resp.status} {text[:200]}")
+            return await resp.read()

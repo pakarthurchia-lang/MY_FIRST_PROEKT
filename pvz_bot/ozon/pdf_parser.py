@@ -6,7 +6,6 @@
 import io
 import re
 import pdfplumber
-from ozon.http_client import get_access_token, _get_cookies, HEADERS_BASE
 
 
 PDF_DOWNLOAD_URL = (
@@ -79,21 +78,8 @@ def parse_pvz_revenue(pdf_bytes: bytes, total_revenue: float = None) -> dict:
 
 
 async def download_and_parse_pdf(report_id: str, total_revenue: float = None) -> dict:
-    """
-    Скачивает PDF-отчёт и возвращает выручку по ПВЗ.
-    """
-    import aiohttp
-
+    """Скачивает PDF-отчёт и возвращает выручку по ПВЗ."""
+    from ozon.http_client import get_bytes
     url = PDF_DOWNLOAD_URL.format(report_id=report_id)
-    token = await get_access_token()
-    cookies = _get_cookies()
-    headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
-
-    async with aiohttp.ClientSession(cookies=cookies) as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"Не удалось скачать PDF: {resp.status} {text[:200]}")
-            pdf_bytes = await resp.read()
-
+    pdf_bytes = await get_bytes(url)
     return parse_pvz_revenue(pdf_bytes, total_revenue=total_revenue)

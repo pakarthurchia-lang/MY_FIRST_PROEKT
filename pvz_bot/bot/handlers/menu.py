@@ -6,6 +6,7 @@ from aiogram.types import (
 )
 from config import OWNER_CHAT_ID
 from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports, _get_all_stores
+from yandex.reports import available_months_for_menu as ym_available_months
 from ozon.analytics import get_all_pvz_analytics
 from ozon.ai_audit import get_pvz_audit
 from bot.handlers.claims import format_claim
@@ -91,13 +92,27 @@ async def cb_profit_months(call: CallbackQuery):
         await call.message.answer("⚠️ Нет утверждённых отчётов.")
         return
 
-    buttons = [
-        [InlineKeyboardButton(
-            text=r["label"],
-            callback_data=f"profit:{r['month']}:{r['year']}"
-        )]
-        for r in reports
-    ]
+    # Строим объединённый список месяцев из Ozon-отчётов + последние месяцы ЯМ
+    ym_months = {(r["month"], r["year"]): r for r in ym_available_months(6)}
+    ozon_keys = {(r["month"], r["year"]) for r in reports}
+    # Все уникальные периоды, отсортированные по убыванию
+    all_keys = sorted(ozon_keys | set(ym_months.keys()), key=lambda x: (x[1], x[0]), reverse=True)
+
+    buttons = []
+    for (m, y) in all_keys:
+        ozon_label = next((r["label"] for r in reports if r["month"] == m and r["year"] == y), None)
+        ym_label = ym_months.get((m, y), {}).get("label") or f"{MONTHS_RU[m][:3]} {y}"
+        row = []
+        if ozon_label:
+            row.append(InlineKeyboardButton(
+                text=f"🟠 Ozon  {ozon_label}",
+                callback_data=f"profit:{m}:{y}"
+            ))
+        row.append(InlineKeyboardButton(
+            text=f"📦 ЯМ  {ym_label}",
+            callback_data=f"ym_profit:{m}:{y}"
+        ))
+        buttons.append(row)
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
 
     await call.message.answer(
