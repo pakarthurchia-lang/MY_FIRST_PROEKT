@@ -106,7 +106,7 @@ async def cb_ym_profit(call: CallbackQuery):
     fines_total_str = f"\n⚠️ Штрафы ЯМ: -{total_fines:,.2f} руб." if total_fines > 0 else ""
 
     text = (
-        f"📦 <b>Яндекс Маркет — {MONTHS_RU[month]} {year}</b>"
+        f"🟡 <b>Яндекс Маркет — {MONTHS_RU[month]} {year}</b>"
         f"{pvz_lines}\n\n"
         f"{'─' * 28}\n"
         f"💰 Общая выручка: {total_revenue:,.2f} руб.\n"
@@ -115,4 +115,9 @@ async def cb_ym_profit(call: CallbackQuery):
         f"✅ <b>Общая прибыль: {total_profit:,.2f} руб.</b>"
     )
 
-    await call.message.answer(text, parse_mode="HTML", reply_markup=main_menu())
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ К месяцам ЯМ", callback_data="profit_platform:ym:0")],
+        [InlineKeyboardButton(text="🏠 Главное меню",  callback_data="menu:back")],
+    ])
+    await call.message.answer(text, parse_mode="HTML", reply_markup=back_kb)

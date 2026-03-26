@@ -1,14 +1,17 @@
+import os
 from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile,
 )
 from config import OWNER_CHAT_ID
 from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports
 from yandex.reports import available_months_for_menu as ym_available_months
 from ozon.analytics import get_all_pvz_analytics
 from bot.handlers.claims import format_claim
+from wildberries.http_client import get_token_status
 
 router = Router()
 
@@ -29,15 +32,35 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
+WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "welcome.jpg")
+
+WELCOME_TEXT = (
+    "👋 <b>Привет, Артур!</b>\n\n"
+    "Я твой AI-ассистент по ПВЗ.\n"
+    "Слежу за прибылью, претензиями и аналитикой по трём платформам:\n\n"
+    "🔵 Ozon · 🟣 Wildberries · 🟡 Яндекс Маркет\n\n"
+    "Выбери раздел:"
+)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     if message.from_user.id != OWNER_CHAT_ID:
         return
-    await message.answer(
-        "🏪 <b>ПВЗ Аналитика</b>\n\nВыбери раздел:",
-        reply_markup=main_menu(),
-        parse_mode="HTML",
-    )
+    img = os.path.normpath(WELCOME_IMAGE)
+    if os.path.exists(img):
+        await message.answer_photo(
+            photo=FSInputFile(img),
+            caption=WELCOME_TEXT,
+            reply_markup=main_menu(),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            WELCOME_TEXT,
+            reply_markup=main_menu(),
+            parse_mode="HTML",
+        )
 
 
 # ── Претензии ──────────────────────────────────────────────────────────────
@@ -69,51 +92,125 @@ async def cb_claims(call: CallbackQuery):
     await call.message.answer(text, parse_mode="HTML", reply_markup=main_menu())
 
 
-# ── Прибыль — выбор месяца ─────────────────────────────────────────────────
+# ── Прибыль — выбор платформы ──────────────────────────────────────────────
+
+def _platform_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔵 Ozon",           callback_data="profit_platform:ozon:0")],
+        [InlineKeyboardButton(text="🟣 Wildberries",   callback_data="profit_platform:wb:0")],
+        [InlineKeyboardButton(text="🟡 Яндекс Маркет", callback_data="profit_platform:ym:0")],
+        [InlineKeyboardButton(text="◀️ Назад",         callback_data="menu:back")],
+    ])
+
 
 @router.callback_query(F.data == "menu:profit")
-async def cb_profit_months(call: CallbackQuery):
+async def cb_profit_menu(call: CallbackQuery):
     if call.from_user.id != OWNER_CHAT_ID:
         return
     await call.answer()
-    await call.message.answer("⏳ Загружаю список отчётов...")
+    await call.message.answer(
+        "💰 <b>Прибыль</b>\n\nВыбери платформу:",
+        reply_markup=_platform_keyboard(),
+        parse_mode="HTML",
+    )
 
-    try:
-        reports = await get_available_reports()
-    except Exception as e:
-        await call.message.answer(f"❌ Ошибка: {e}")
-        return
 
-    if not reports:
-        await call.message.answer("⚠️ Нет утверждённых отчётов.")
-        return
+# ── Прибыль — выбор месяца по платформе ────────────────────────────────────
 
-    # Строим объединённый список месяцев из Ozon-отчётов + последние месяцы ЯМ
-    ym_months = {(r["month"], r["year"]): r for r in ym_available_months(6)}
-    ozon_keys = {(r["month"], r["year"]) for r in reports}
-    # Все уникальные периоды, отсортированные по убыванию
-    all_keys = sorted(ozon_keys | set(ym_months.keys()), key=lambda x: (x[1], x[0]), reverse=True)
+PAGE_SIZE = 6  # месяцев на странице (2 колонки × 3 строки)
+
+
+def _months_keyboard(platform: str, months: list, page: int) -> InlineKeyboardMarkup:
+    """Строит клавиатуру с месяцами: 2 колонки, PAGE_SIZE месяцев + пагинация."""
+    start = page * PAGE_SIZE
+    chunk = months[start: start + PAGE_SIZE]
+
+    icons = {"ozon": "🔵", "wb": "🟣", "ym": "🟡"}
+    prefixes = {"ozon": "profit", "wb": "wb_profit", "ym": "ym_profit"}
+    icon = icons[platform]
+    prefix = prefixes[platform]
 
     buttons = []
-    for (m, y) in all_keys:
-        ozon_label = next((r["label"] for r in reports if r["month"] == m and r["year"] == y), None)
-        ym_label = ym_months.get((m, y), {}).get("label") or f"{MONTHS_RU[m][:3]} {y}"
-        row = []
-        if ozon_label:
-            row.append(InlineKeyboardButton(
-                text=f"🟠 Ozon  {ozon_label}",
-                callback_data=f"profit:{m}:{y}"
-            ))
+    # Пары кнопок по 2 в ряд
+    row = []
+    for item in chunk:
+        m, y = item["month"], item["year"]
+        label = item.get("label") or f"{MONTHS_RU[m][:3]} {y}"
         row.append(InlineKeyboardButton(
-            text=f"📦 ЯМ  {ym_label}",
-            callback_data=f"ym_profit:{m}:{y}"
+            text=f"{icon} {label}",
+            callback_data=f"{prefix}:{m}:{y}",
         ))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+
+    # Пагинация
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"profit_platform:{platform}:{page - 1}"))
+    if start + PAGE_SIZE < len(months):
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"profit_platform:{platform}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+
+    buttons.append([InlineKeyboardButton(text="↩️ К платформам", callback_data="menu:profit")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data.startswith("profit_platform:"))
+async def cb_profit_platform(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+
+    _, platform, page_str = call.data.split(":")
+    page = int(page_str)
+
+    names = {"ozon": "🔵 Ozon", "wb": "🟣 Wildberries", "ym": "🟡 Яндекс Маркет"}
+
+    try:
+        if platform == "ozon":
+            reports = await get_available_reports()
+            months = sorted(
+                [{"month": r["month"], "year": r["year"], "label": r["label"]} for r in reports],
+                key=lambda x: (x["year"], x["month"]), reverse=True,
+            )
+        elif platform == "wb":
+            if not get_token_status()["valid"]:
+                await call.message.answer(
+                    "⚠️ WB токен не найден или истёк.\n"
+                    "Обнови: /wb_token eyJ...",
+                    reply_markup=_platform_keyboard(),
+                )
+                return
+            from wildberries.api import get_available_months as wb_get_months
+            months = await wb_get_months(24)
+        elif platform == "ym":
+            months = ym_available_months(24)
+        else:
+            return
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка: {e}", reply_markup=_platform_keyboard())
+        return
+
+    if not months:
+        await call.message.answer(
+            f"⚠️ Нет данных для {names[platform]}",
+            reply_markup=_platform_keyboard(),
+        )
+        return
+
+    total = len(months)
+    shown_from = page * PAGE_SIZE + 1
+    shown_to = min((page + 1) * PAGE_SIZE, total)
+    page_info = f"  <i>{shown_from}–{shown_to} из {total}</i>" if total > PAGE_SIZE else ""
 
     await call.message.answer(
-        "📅 Выбери период:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        f"💰 {names[platform]} — выбери месяц:{page_info}",
+        reply_markup=_months_keyboard(platform, months, page),
+        parse_mode="HTML",
     )
 
 
@@ -198,7 +295,11 @@ async def cb_profit_result(call: CallbackQuery):
         f"{shortfall_total_str}"
     )
 
-    await call.message.answer(text, parse_mode="HTML", reply_markup=main_menu())
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ К месяцам Ozon", callback_data="profit_platform:ozon:0")],
+        [InlineKeyboardButton(text="🏠 Главное меню",   callback_data="menu:back")],
+    ])
+    await call.message.answer(text, parse_mode="HTML", reply_markup=back_kb)
 
 
 # ── Статистика (бывшая Аналитика) ──────────────────────────────────────────
@@ -281,4 +382,13 @@ async def cb_back(call: CallbackQuery):
     if call.from_user.id != OWNER_CHAT_ID:
         return
     await call.answer()
-    await call.message.answer("Выбери раздел:", reply_markup=main_menu())
+    img = os.path.normpath(WELCOME_IMAGE)
+    if os.path.exists(img):
+        await call.message.answer_photo(
+            photo=FSInputFile(img),
+            caption=WELCOME_TEXT,
+            reply_markup=main_menu(),
+            parse_mode="HTML",
+        )
+    else:
+        await call.message.answer(WELCOME_TEXT, reply_markup=main_menu(), parse_mode="HTML")
