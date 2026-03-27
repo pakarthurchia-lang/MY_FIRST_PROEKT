@@ -1,8 +1,7 @@
 # Секреты и сессии
 .env
-data/ozon_token.json
-data/ozon_session.json
-data/pvz_bot.db
+data/
+*.json
 
 # Python
 venv/

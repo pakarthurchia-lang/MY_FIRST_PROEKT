@@ -21,6 +21,7 @@ async def get_pvz_audit(location: dict, expenses: dict, month: int, year: int) -
 
     ozon_pvzs = [p for p in location["pvzs"] if p["platform"] == "ozon"]
     ym_pvzs = [p for p in location["pvzs"] if p["platform"] == "ym"]
+    wb_pvzs = [p for p in location["pvzs"] if p["platform"] == "wb"]
 
     # ── Ozon данные ────────────────────────────────────────────────────────
     ozon_profit_data: Dict[str, List] = {}  # pvz_name -> list of monthly dicts
@@ -110,6 +111,20 @@ async def get_pvz_audit(location: dict, expenses: dict, month: int, year: int) -
         except Exception:
             pass
 
+    # ── Wildberries данные ─────────────────────────────────────────────────
+    wb_revenue_data: Dict[str, List] = {}  # pvz_name -> list of monthly dicts
+
+    if wb_pvzs:
+        try:
+            from db.database import get_wb_monthly_history
+            for pvz in wb_pvzs:
+                name = pvz["pvz_name"]
+                history = await get_wb_monthly_history(name, n=6)
+                if history:
+                    wb_revenue_data[name] = history
+        except Exception:
+            pass
+
     # ── Строим промпт ──────────────────────────────────────────────────────
     prompt = _build_prompt(
         location=location,
@@ -121,6 +136,7 @@ async def get_pvz_audit(location: dict, expenses: dict, month: int, year: int) -
         ym_revenue_data=ym_revenue_data,
         ym_turnover_data=ym_turnover_data,
         ym_fines_data=ym_fines_data,
+        wb_revenue_data=wb_revenue_data,
         reports_total=reports_total,
         ozon_data_missing=ozon_data_missing and bool(ozon_pvzs),
     )
@@ -144,6 +160,7 @@ def _build_prompt(
     ym_revenue_data: dict,
     ym_turnover_data: dict,
     ym_fines_data: dict,
+    wb_revenue_data: dict,
     reports_total: int,
     ozon_data_missing: bool = False,
 ) -> str:
@@ -219,6 +236,20 @@ def _build_prompt(
             for p in months_list:
                 lines.append(f"    {p['period']}: {p['turnover']:,.0f} руб.")
 
+    # WB финансы
+    if wb_revenue_data:
+        lines.append("\nWildberries — вознаграждение по месяцам:")
+        for pvz_name, months_list in wb_revenue_data.items():
+            lines.append(f"  ПВЗ: {pvz_name}")
+            for p in months_list:
+                fines_note = f" (удержания: -{p['fines']:,.0f})" if p.get("fines") else ""
+                orders_note = f" [{p['orders']} выдач]" if p.get("orders") else ""
+                lines.append(f"    {p['period']}: {p['revenue']:,.0f} руб.{fines_note}{orders_note}")
+            if len(months_list) >= 2:
+                diff = months_list[0]["revenue"] - months_list[-1]["revenue"]
+                trend = f"рост +{diff:,.0f} руб." if diff > 0 else f"падение {diff:,.0f} руб."
+                lines.append(f"    Тренд: {trend}")
+
     # Расходы
     rent = expenses.get("rent", 0)
     salary = expenses.get("salary", 0)
@@ -249,14 +280,17 @@ def _build_prompt(
     total_ym_revenue = sum(
         months[0]["revenue"] for months in ym_revenue_data.values() if months
     )
-    total_gross = total_ozon_revenue + total_ym_revenue
+    total_wb_revenue = sum(
+        months[0]["revenue"] for months in wb_revenue_data.values() if months
+    )
+    total_gross = total_ozon_revenue + total_ym_revenue + total_wb_revenue
     total_deductions = total_ozon_tax + total_ozon_fines
     net_profit = total_gross - total_deductions - total_expenses
 
     lines += [
         "",
         "РАСЧЁТ (последний месяц):",
-        f"  Суммарная выручка (Ozon + ЯМ): {total_gross:,.0f} руб.",
+        f"  Суммарная выручка (Ozon + ЯМ + WB): {total_gross:,.0f} руб.",
         f"  Налоги: -{total_ozon_tax:,.0f} руб.",
         f"  Штрафы/претензии: -{total_ozon_fines:,.0f} руб.",
         f"  Расходы: -{total_expenses:,.0f} руб.",

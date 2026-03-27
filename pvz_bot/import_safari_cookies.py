@@ -52,6 +52,7 @@ def main():
     os.makedirs(os.path.dirname(OZON_SESSION_FILE), exist_ok=True)
     with open(OZON_SESSION_FILE, "w") as f:
         json.dump(storage_state, f, ensure_ascii=False, indent=2)
+    os.chmod(OZON_SESSION_FILE, 0o600)
 
     print(f"\n✅ Сохранено {len(playwright_cookies)} куки в {OZON_SESSION_FILE}")
     print("Теперь запусти бота: python main.py")

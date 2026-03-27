@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import os
+import signal
+import sys
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from bot.handlers import auth, claims, menu, ym_upload, audit, location_setup
+from bot.handlers import auth, claims, menu, ym_upload, wb_upload, audit, location_setup
 from db.database import init_db
 from scheduler.jobs import setup_scheduler
 from config import BOT_TOKEN, OWNER_CHAT_ID
@@ -12,6 +15,35 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+PIDFILE = "data/bot.pid"
+
+
+def _kill_previous():
+    """Убивает предыдущий экземпляр бота если он запущен."""
+    if not os.path.exists(PIDFILE):
+        return
+    try:
+        with open(PIDFILE) as f:
+            old_pid = int(f.read().strip())
+        if old_pid != os.getpid():
+            os.kill(old_pid, signal.SIGTERM)
+            logger.info(f"Остановлен предыдущий экземпляр (pid {old_pid})")
+    except (ProcessLookupError, ValueError):
+        pass  # процесс уже не существует
+
+
+def _write_pid():
+    os.makedirs("data", exist_ok=True)
+    with open(PIDFILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _remove_pid():
+    try:
+        os.remove(PIDFILE)
+    except FileNotFoundError:
+        pass
 
 
 async def main():
@@ -24,6 +56,7 @@ async def main():
     dp.include_router(location_setup.router)
     dp.include_router(audit.router)
     dp.include_router(ym_upload.router)
+    dp.include_router(wb_upload.router)
     dp.include_router(auth.router)
     dp.include_router(claims.router)
 
@@ -52,4 +85,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _kill_previous()
+    _write_pid()
+    try:
+        asyncio.run(main())
+    finally:
+        _remove_pid()

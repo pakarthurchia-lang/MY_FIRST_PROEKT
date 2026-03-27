@@ -2,6 +2,7 @@
 Управление локациями ПВЗ.
 """
 import sqlite3
+from typing import Optional, Tuple, List
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -27,7 +28,7 @@ class LocationSetupState(StatesGroup):
 
 # ── Загрузка доступных ПВЗ ─────────────────────────────────────────────────
 
-async def _load_all_pvzs() -> tuple[list[dict], str | None]:
+async def _load_all_pvzs() -> Tuple[List[dict], Optional[str]]:
     """
     Возвращает (pvzs, warning).
     pvzs — список {platform, pvz_id, pvz_name}
@@ -67,6 +68,19 @@ async def _load_all_pvzs() -> tuple[list[dict], str | None]:
                 })
     except Exception:
         warning = "⚠️ Яндекс Маркет недоступен — показываю только Ozon ПВЗ."
+
+    # Wildberries (из сохранённых отчётов в БД)
+    try:
+        from db.database import get_wb_pvz_names
+        wb_names = await get_wb_pvz_names()
+        for name in wb_names:
+            pvzs.append({
+                "platform": "wb",
+                "pvz_id": None,
+                "pvz_name": name,
+            })
+    except Exception:
+        pass
 
     return pvzs, warning
 

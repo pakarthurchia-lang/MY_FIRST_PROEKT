@@ -34,6 +34,7 @@ class Handler(BaseHTTPRequestHandler):
         os.makedirs("data", exist_ok=True)
         with open(TOKEN_FILE, "w") as f:
             json.dump(token_data, f, indent=2)
+        os.chmod(TOKEN_FILE, 0o600)
 
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -67,6 +68,7 @@ def import_cookies():
         os.makedirs(os.path.dirname(OZON_SESSION_FILE), exist_ok=True)
         with open(OZON_SESSION_FILE, "w") as f:
             json.dump({"cookies": playwright_cookies, "origins": []}, f, indent=2)
+        os.chmod(OZON_SESSION_FILE, 0o600)
         print(f"✅ Сохранено {len(playwright_cookies)} куки")
     except Exception as e:
         print(f"⚠️  Куки: {e}")

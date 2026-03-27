@@ -29,14 +29,15 @@ def main():
         print("Убедись что ты залогинен в Safari на hubs.market.yandex.ru")
         return
 
-    print(f"✅ Session_id найден: {session_id[:20]}...")
+    print("✅ Session_id найден")
 
     data = {"session_id": session_id, "partner_id": PARTNER_ID}
     os.makedirs("data", exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
 
-    print(f"✅ Сохранено в {TOKEN_FILE}")
+    print(f"✅ Сохранено в {TOKEN_FILE} (права 600)")
     print("Теперь бот будет автоматически скачивать отчёты ЯМ.")
 
 

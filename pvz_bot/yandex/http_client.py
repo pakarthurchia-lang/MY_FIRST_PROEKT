@@ -43,6 +43,7 @@ def _save_token(data: dict):
     os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
 
 
 def get_token_data() -> dict:

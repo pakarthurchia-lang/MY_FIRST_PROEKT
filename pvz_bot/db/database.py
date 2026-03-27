@@ -56,6 +56,19 @@ async def init_db():
                 pvz_name    TEXT NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wb_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pvz_name TEXT NOT NULL,
+                month INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                revenue REAL DEFAULT 0,
+                fines REAL DEFAULT 0,
+                orders INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(pvz_name, month, year)
+            )
+        """)
         await db.execute("PRAGMA foreign_keys = ON")
         await db.commit()
 
@@ -190,3 +203,89 @@ async def mark_alerted(claim_id: str, hours: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(f"UPDATE claims SET {col}=1 WHERE id=?", (claim_id,))
         await db.commit()
+
+
+# ── Wildberries отчёты ──────────────────────────────────────────────────────
+
+async def upsert_wb_report(pvz_name: str, month: int, year: int,
+                            revenue: float, fines: float, orders: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO wb_reports (pvz_name, month, year, revenue, fines, orders)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pvz_name, month, year) DO UPDATE SET
+                revenue=excluded.revenue,
+                fines=excluded.fines,
+                orders=excluded.orders,
+                created_at=datetime('now')
+        """, (pvz_name, month, year, revenue, fines, orders))
+        await db.commit()
+
+
+async def get_wb_report(month: int, year: int) -> dict:
+    """Возвращает {pvz_name: {revenue, fines, orders}} за выбранный месяц."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT pvz_name, revenue, fines, orders FROM wb_reports WHERE month=? AND year=?",
+            (month, year)
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {r["pvz_name"]: {"revenue": r["revenue"], "fines": r["fines"], "orders": r["orders"]}
+            for r in rows}
+
+
+async def get_wb_pvz_names() -> list:
+    """Возвращает список уникальных имён WB ПВЗ из всех загруженных отчётов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT pvz_name FROM wb_reports ORDER BY pvz_name"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [r[0] for r in rows]
+
+
+async def get_wb_available_months(n: int = 6) -> list:
+    """
+    Возвращает список {month, year, label} для месяцев с WB данными,
+    отсортированных по убыванию (свежие первые).
+    """
+    MONTHS_RU = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                 "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT DISTINCT month, year FROM wb_reports
+            ORDER BY year DESC, month DESC
+            LIMIT ?
+        """, (n,)) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        {"month": r[0], "year": r[1], "label": f"{MONTHS_RU[r[0]][:3]} {r[1]}"}
+        for r in rows
+    ]
+
+
+async def get_wb_monthly_history(pvz_name: str, n: int = 6) -> list:
+    """Возвращает историю по конкретному ПВЗ за последние n месяцев."""
+    MONTHS_RU = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                 "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT month, year, revenue, fines, orders FROM wb_reports
+            WHERE pvz_name=?
+            ORDER BY year DESC, month DESC
+            LIMIT ?
+        """, (pvz_name, n)) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        {
+            "period": f"{MONTHS_RU[r['month']][:3]} {r['year']}",
+            "month": r["month"],
+            "year": r["year"],
+            "revenue": r["revenue"],
+            "fines": r["fines"],
+            "orders": r["orders"],
+        }
+        for r in rows
+    ]
