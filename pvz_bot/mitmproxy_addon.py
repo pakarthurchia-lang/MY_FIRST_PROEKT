@@ -23,6 +23,10 @@ PVZ_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "data", "ozon_token.jso
 PVZ_AUTH_HOST = "turbo-pvz.ozon.ru"
 PVZ_AUTH_PATH = "/api2/Mobile/auth/ozonIdCookie/V3"
 
+WB_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "data", "wb_token.json")
+WB_REFRESH_HOST = "r-point.wb.ru"
+WB_REFRESH_PATH = "/api/v1/refresh"
+
 # SSO куки которые нас интересуют
 SSO_COOKIE_NAMES = {
     "__Secure-access-token",
@@ -46,6 +50,11 @@ def response(flow: http.HTTPFlow) -> None:
     # Перехватываем PVZ токен из ozonIdCookie/V3
     if flow.request.host == PVZ_AUTH_HOST and flow.request.path.startswith(PVZ_AUTH_PATH):
         _handle_pvz_auth(flow)
+        return
+
+    # Перехватываем WB токены из r-point.wb.ru/api/v1/refresh
+    if flow.request.host == WB_REFRESH_HOST and flow.request.path.startswith(WB_REFRESH_PATH):
+        _handle_wb_refresh(flow)
         return
 
     if flow.request.host != TARGET_HOST:
@@ -112,6 +121,49 @@ def _handle_pvz_auth(flow: http.HTTPFlow) -> None:
         print(f"[ozon-addon] ✅ PVZ токен сохранён из ozonIdCookie/V3")
     except Exception as e:
         print(f"[ozon-addon] ❌ Ошибка при сохранении PVZ токена: {e}")
+
+
+def _handle_wb_refresh(flow: http.HTTPFlow) -> None:
+    """Сохраняет WB токены из ответа r-point.wb.ru/api/v1/refresh."""
+    if flow.response.status_code != 200:
+        return
+    try:
+        import json as _json, base64
+        data = _json.loads(flow.response.get_content())
+        new_access = data.get("access", {}).get("token")
+        new_refresh = data.get("refresh", {}).get("token")
+        if not new_access:
+            return
+
+        def _jwt_exp(jwt):
+            try:
+                part = jwt.split(".")[1]
+                part += "=" * (4 - len(part) % 4)
+                return int(_json.loads(base64.b64decode(part)).get("exp", 0))
+            except Exception:
+                return 0
+
+        # Читаем pickpoint_id из существующего файла
+        try:
+            with open(WB_TOKEN_FILE) as f:
+                existing = _json.load(f)
+        except Exception:
+            existing = {}
+
+        token_data = {
+            **existing,
+            "x_token": new_access,
+            "exp": _jwt_exp(new_access),
+            "refresh_token": new_refresh,
+            "refresh_exp": _jwt_exp(new_refresh),
+        }
+        os.makedirs(os.path.dirname(WB_TOKEN_FILE), exist_ok=True)
+        with open(WB_TOKEN_FILE, "w") as f:
+            _json.dump(token_data, f, indent=2)
+        os.chmod(WB_TOKEN_FILE, 0o600)
+        print("[ozon-addon] ✅ WB токены сохранены из r-point/refresh")
+    except Exception as e:
+        print(f"[ozon-addon] ❌ Ошибка при сохранении WB токена: {e}")
 
 
 def _parse_set_cookies(response: http.Response) -> dict:

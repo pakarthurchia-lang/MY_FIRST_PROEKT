@@ -8,15 +8,26 @@ HTTP-клиент для WB ПВЗ API (point-balance.wb.ru).
 - HTTPS — трафик зашифрован
 
 Авторизация: X-Token header (JWT, живёт 24 часа).
-Автообновление: пробуем читать из Safari localStorage.
+Автообновление: POST r-point.wb.ru/api/v1/refresh с refresh_token (живёт 90 дней).
+
+Формат data/wb_token.json:
+  {
+    "x_token": "...",        # access token, 24ч
+    "exp": 1234567890,       # unix timestamp истечения access token
+    "refresh_token": "...",  # refresh token, 90 дней
+    "refresh_exp": ...,      # unix timestamp истечения refresh token
+    "pickpoint_id": 12345
+  }
 """
 import json
 import os
 import time
+import base64
 import aiohttp
 
 TOKEN_FILE = "data/wb_token.json"
 BASE_URL = "https://point-balance.wb.ru"
+WB_REFRESH_URL = "https://r-point.wb.ru/api/v1/refresh"
 
 HEADERS_BASE = {
     "Accept": "application/json, text/plain, */*",
@@ -32,6 +43,15 @@ HEADERS_BASE = {
     "X-App-Version": "v9.7.362",
 }
 
+MOBILE_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "x-app-type": "mobile",
+    "x-app-version": "v3.61.0",
+    "x-device-type": "ios",
+    "User-Agent": "WBPoint/14287039 CFNetwork/3826.500.131 Darwin/24.5.0",
+}
+
 _token_cache: dict = {}
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
@@ -41,6 +61,24 @@ def _load_token() -> dict:
         with open(TOKEN_FILE) as f:
             return json.load(f)
     return {}
+
+
+def _save_token(data: dict):
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(TOKEN_FILE, 0o600)
+
+
+def _jwt_exp(token: str) -> int:
+    """Декодирует exp из JWT без верификации подписи."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        claims = json.loads(base64.b64decode(payload))
+        return int(claims.get("exp", 0))
+    except Exception:
+        return 0
 
 
 def _is_expired(token_data: dict, margin_sec: int = 300) -> bool:
@@ -72,12 +110,56 @@ def get_token_status() -> dict:
     }
 
 
+async def _refresh_wb_token() -> str:
+    """
+    Обновляет WB access token через refresh token.
+    POST r-point.wb.ru/api/v1/refresh
+    Возвращает новый x_token и сохраняет в файл.
+    """
+    global _token_cache
+    data = _token_cache or _load_token()
+    refresh_token = data.get("refresh_token")
+    if not refresh_token:
+        raise RuntimeError("WB refresh_token отсутствует")
+
+    refresh_exp = data.get("refresh_exp", 0)
+    if refresh_exp and time.time() >= refresh_exp:
+        raise RuntimeError("WB refresh_token истёк (90 дней)")
+
+    access_token = data.get("x_token", "")
+    headers = {**MOBILE_HEADERS, "x-token": access_token}
+    body = {"backOffice": False, "token": refresh_token}
+
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        async with session.post(WB_REFRESH_URL, json=body, headers=headers) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise RuntimeError(f"WB refresh вернул {resp.status}: {text[:200]}")
+            result = await resp.json()
+
+    new_access = result["access"]["token"]
+    new_refresh = result["refresh"]["token"]
+
+    updated = {
+        **data,
+        "x_token": new_access,
+        "exp": _jwt_exp(new_access),
+        "refresh_token": new_refresh,
+        "refresh_exp": _jwt_exp(new_refresh),
+    }
+    _save_token(updated)
+    _token_cache = updated
+    print("✅ WB токен обновлён через refresh_token")
+    return new_access
+
+
 async def _get_token() -> str:
     """
     Возвращает актуальный X-Token.
     1. Из кэша если не истёк
-    2. Из Safari localStorage автоматически
-    3. Ошибка с инструкцией
+    2. Обновляем через refresh_token (90 дней)
+    3. Из Safari localStorage
+    4. Ошибка с инструкцией
     """
     global _token_cache
 
@@ -87,24 +169,25 @@ async def _get_token() -> str:
     if _token_cache.get("x_token") and not _is_expired(_token_cache):
         return _token_cache["x_token"]
 
-    # Пробуем обновить из Safari
+    # Пробуем обновить через refresh_token
+    try:
+        return await _refresh_wb_token()
+    except Exception as e:
+        print(f"⚠️ WB refresh не сработал: {e}")
+
+    # Пробуем обновить из Safari (только Mac)
     try:
         from wildberries.safari_token import update_token_from_safari
-        token = update_token_from_safari()
+        update_token_from_safari()
         _token_cache = _load_token()
-        return token
+        if _token_cache.get("x_token") and not _is_expired(_token_cache):
+            return _token_cache["x_token"]
     except Exception:
         pass
 
-    if _token_cache.get("x_token") and not _is_expired(_token_cache, margin_sec=0):
-        # Токен ещё формально живой (просто истекает скоро)
-        return _token_cache["x_token"]
-
     raise RuntimeError(
-        "WB токен истёк. Обнови его:\n"
-        "1. Открой pvz-lk.wb.ru в Safari\n"
-        "2. Запусти: python wildberries/setup_token.py\n"
-        "Или в боте: /wb_refresh"
+        "WB токен истёк и не удалось обновить автоматически.\n"
+        "Открой pvz-lk.wb.ru, нажми закладку «Обновить токен WB» и вставь в бота."
     )
 
 
