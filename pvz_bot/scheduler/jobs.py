@@ -38,10 +38,14 @@ async def check_claims_and_notify(bot: Bot):
     try:
         await scrape_claims()
     except Exception as e:
-        await bot.send_message(
-            OWNER_CHAT_ID,
-            f"❌ Не удалось обновить претензии: {e}\nПроверь авторизацию /login"
-        )
+        err = str(e)
+        if "401" in err or "токен" in err.lower() or "авторизац" in err.lower():
+            await bot.send_message(OWNER_CHAT_ID, TOKEN_RENEWAL_INSTRUCTION, parse_mode="HTML")
+        else:
+            await bot.send_message(
+                OWNER_CHAT_ID,
+                f"❌ Не удалось обновить претензии: {e}"
+            )
         return
 
     # Срочные (за 2 часа)
@@ -55,6 +59,43 @@ async def check_claims_and_notify(bot: Bot):
     for claim in soon:
         await bot.send_message(OWNER_CHAT_ID, format_alert(claim, "warning"), parse_mode="HTML")
         await mark_alerted(claim["id"], ALERT_BEFORE_HOURS)
+
+
+TOKEN_RENEWAL_INSTRUCTION = (
+    "🔑 <b>Нужно обновить токен Ozon</b>\n\n"
+    "Это займёт 10 секунд:\n\n"
+    "1️⃣ Открой <b>turbo-pvz.ozon.ru</b> в браузере\n"
+    "   (уже залогинен, ничего вводить не нужно)\n\n"
+    "2️⃣ Нажми закладку <b>«Обновить токен ПВЗ»</b>\n"
+    "   Появится сообщение «Скопировано!»\n\n"
+    "3️⃣ Открой этот чат и нажми ⌘+V → отправь\n\n"
+    "После этого бот продолжит работать в обычном режиме."
+)
+
+
+async def check_ozon_token(bot: Bot):
+    """Проверяет токен Ozon и уведомляет если скоро истечёт или уже истёк."""
+    import time
+    from ozon.http_client import _load_token
+
+    token = _load_token()
+    if not token or not token.get("access_token"):
+        await bot.send_message(OWNER_CHAT_ID, TOKEN_RENEWAL_INSTRUCTION, parse_mode="HTML")
+        return
+
+    # Проверяем refresh_token — если истекает в ближайшие 12 часов
+    refresh_exp = token.get("refresh_expire_time", 0)
+    if refresh_exp and refresh_exp > 1e12:
+        refresh_exp /= 1000
+
+    now = time.time()
+    if refresh_exp and now >= refresh_exp - 12 * 3600:
+        hours_left = max(0, int((refresh_exp - now) / 3600))
+        warning = (
+            f"⚠️ <b>Токен Ozon истекает через {hours_left} ч.</b>\n\n"
+            + TOKEN_RENEWAL_INSTRUCTION
+        )
+        await bot.send_message(OWNER_CHAT_ID, warning, parse_mode="HTML")
 
 
 async def send_daily_summary(bot: Bot):
@@ -99,6 +140,16 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         minute=0,
         args=[bot],
         id="daily_summary",
+    )
+
+    # Проверка токена Ozon раз в день в 10:00
+    scheduler.add_job(
+        check_ozon_token,
+        "cron",
+        hour=10,
+        minute=0,
+        args=[bot],
+        id="check_ozon_token",
     )
 
     return scheduler

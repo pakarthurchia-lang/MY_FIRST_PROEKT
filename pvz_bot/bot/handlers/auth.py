@@ -9,9 +9,10 @@
 Не требует Playwright, Safari, DevTools.
 """
 import json
+import os
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from config import OWNER_CHAT_ID, OZON_PHONE
@@ -111,6 +112,28 @@ async def handle_code(message: Message, state: FSMContext):
         "✅ <b>Ozon авторизация успешна!</b>\n\n"
         "Токен сохранён. Бот будет автоматически обновлять его через refresh_token.",
         parse_mode="HTML",
+    )
+
+
+# ── /setup — установка закладок ───────────────────────────────────────────────
+
+@router.message(Command("setup"))
+async def cmd_setup(message: Message):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+
+    html_path = os.path.join(os.path.dirname(__file__), "..", "..", "setup", "bookmarklets.html")
+    html_path = os.path.normpath(html_path)
+
+    await message.answer(
+        "📎 <b>Установка кнопок для браузера</b>\n\n"
+        "Открой файл ниже на компьютере в браузере и перетащи кнопки в панель закладок.\n\n"
+        "После этого обновлять токен будет просто:\n"
+        "нажать кнопку → скопировать → вставить в бота.",
+        parse_mode="HTML",
+    )
+    await message.answer_document(
+        FSInputFile(html_path, filename="Настройка ПВЗ бота.html"),
     )
 
 

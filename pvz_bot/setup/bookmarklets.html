@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Настройка кнопок для ПВЗ бота</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    padding: 40px 20px;
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .subtitle { color: #6e6e73; font-size: 17px; margin-bottom: 40px; }
+
+  .step {
+    background: white;
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+  }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+  .step-num {
+    width: 36px; height: 36px;
+    background: #0071e3;
+    color: white;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 16px;
+    flex-shrink: 0;
+  }
+  .step-title { font-size: 19px; font-weight: 600; }
+  .step-desc { color: #6e6e73; font-size: 15px; line-height: 1.5; margin-bottom: 20px; }
+
+  .bookmarklet-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .bookmarklet-btn {
+    display: inline-block;
+    padding: 12px 22px;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: grab;
+    user-select: none;
+    white-space: nowrap;
+    border: 2px solid transparent;
+    transition: transform 0.1s, box-shadow 0.1s;
+  }
+  .bookmarklet-btn:active { cursor: grabbing; }
+  .btn-ozon {
+    background: #005bff;
+    color: white;
+  }
+  .btn-wb {
+    background: #cb11ab;
+    color: white;
+  }
+  .drag-hint {
+    color: #6e6e73;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .drag-arrow { font-size: 20px; }
+
+  .toolbar-demo {
+    background: #e8e8ed;
+    border-radius: 10px;
+    padding: 10px 16px;
+    margin-top: 16px;
+    font-size: 14px;
+    color: #6e6e73;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toolbar-demo .fake-btn {
+    background: #d1d1d6;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 13px;
+    color: #1d1d1f;
+  }
+
+  .step-how {
+    background: #f5f5f7;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-top: 4px;
+  }
+  .step-how p {
+    font-size: 14px;
+    color: #3a3a3c;
+    line-height: 1.6;
+    margin-bottom: 6px;
+  }
+  .step-how p:last-child { margin-bottom: 0; }
+  .step-how b { color: #1d1d1f; }
+
+  .how-to-use {
+    background: white;
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+  }
+  .how-to-use h2 { font-size: 19px; font-weight: 600; margin-bottom: 16px; }
+  .use-step {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 12px;
+    align-items: flex-start;
+  }
+  .use-emoji { font-size: 20px; flex-shrink: 0; }
+  .use-text { font-size: 15px; line-height: 1.5; color: #3a3a3c; }
+
+  .success-note {
+    background: #d1fae5;
+    border-radius: 12px;
+    padding: 16px;
+    font-size: 14px;
+    color: #065f46;
+    margin-top: 16px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .step, .how-to-use { background: #2c2c2e; box-shadow: none; }
+    .step-desc, .drag-hint, .use-text { color: #aeaeb2; }
+    .toolbar-demo { background: #3a3a3c; color: #aeaeb2; }
+    .toolbar-demo .fake-btn { background: #48484a; color: #f5f5f7; }
+    .step-how { background: #3a3a3c; }
+    .step-how p { color: #d1d1d6; }
+    .step-how b { color: #f5f5f7; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Настройка ПВЗ бота</h1>
+<p class="subtitle">Установи две кнопки в браузер — займёт 2 минуты</p>
+
+<!-- OZON -->
+<div class="step">
+  <div class="step-header">
+    <div class="step-num">1</div>
+    <div class="step-title">Кнопка для Ozon ПВЗ</div>
+  </div>
+  <p class="step-desc">
+    Перетащи синюю кнопку в панель закладок браузера
+    (полоска с сайтами вверху).
+  </p>
+
+  <div class="bookmarklet-row">
+    <a class="bookmarklet-btn btn-ozon"
+       href="javascript:(function(){var d=JSON.parse(localStorage.getItem('pvz-access-token')||'{}');var t=JSON.stringify({access_token:d.access_token,refresh_token:d.refresh_token,expire_time:d.expire_time,refresh_expire_time:d.refresh_expire_time});navigator.clipboard.writeText('/ozon_token '+t).then(function(){alert('Скопировано! Теперь вставь в бота.');});})();">
+      🏪 Обновить токен Ozon
+    </a>
+    <div class="drag-hint">
+      <span class="drag-arrow">←</span>
+      перетащи сюда
+    </div>
+  </div>
+
+  <div class="toolbar-demo">
+    Панель закладок выглядит примерно так:
+    <span class="fake-btn">Почта</span>
+    <span class="fake-btn">Новости</span>
+    <span class="fake-btn" style="background:#005bff;color:white;">🏪 Обновить токен Ozon</span>
+  </div>
+
+  <div class="step-how" style="margin-top:14px;">
+    <p>⚠️ <b>Не видишь панель закладок?</b></p>
+    <p>Safari: <b>Вид → Показать панель закладок</b></p>
+    <p>Chrome: <b>⋮ → Закладки → Показать панель закладок</b></p>
+    <p>Yandex: нажми <b>Ctrl+Shift+B</b> (Windows) или <b>⌘+Shift+B</b> (Mac)</p>
+  </div>
+</div>
+
+<!-- WB -->
+<div class="step">
+  <div class="step-header">
+    <div class="step-num">2</div>
+    <div class="step-title">Кнопка для Wildberries ПВЗ</div>
+  </div>
+  <p class="step-desc">
+    Так же перетащи фиолетовую кнопку в панель закладок.
+  </p>
+
+  <div class="bookmarklet-row">
+    <a class="bookmarklet-btn btn-wb"
+       href="javascript:(function(){var t=localStorage.getItem('_wb-ext-user-token');if(!t){alert('Токен не найден. Убедись что открыт pvz-lk.wb.ru');return;}t=t.replace(/^\&quot;|\&quot;$/g,'');navigator.clipboard.writeText('/wb_token '+t).then(function(){alert('Скопировано! Теперь вставь в бота.');});})();">
+      🛍 Обновить токен WB
+    </a>
+    <div class="drag-hint">
+      <span class="drag-arrow">←</span>
+      перетащи сюда
+    </div>
+  </div>
+</div>
+
+<!-- КАК ПОЛЬЗОВАТЬСЯ -->
+<div class="how-to-use">
+  <h2>Как обновлять токен (когда бот попросит)</h2>
+
+  <div class="use-step">
+    <span class="use-emoji">1️⃣</span>
+    <span class="use-text">Открой <b>turbo-pvz.ozon.ru</b> (для Ozon) или <b>pvz-lk.wb.ru</b> (для WB) — ты уже залогинен, ничего вводить не нужно</span>
+  </div>
+  <div class="use-step">
+    <span class="use-emoji">2️⃣</span>
+    <span class="use-text">Нажми кнопку в закладках — появится сообщение <b>«Скопировано!»</b></span>
+  </div>
+  <div class="use-step">
+    <span class="use-emoji">3️⃣</span>
+    <span class="use-text">Открой Telegram, нажми <b>⌘+V</b> (Mac) или долгое нажатие → Вставить (телефон) и отправь</span>
+  </div>
+
+  <div class="success-note">
+    ✅ Готово — бот продолжит работу. Ozon токен обновлять раз в 3 дня, WB — раз в сутки.
+  </div>
+</div>
+
+</body>
+</html>
