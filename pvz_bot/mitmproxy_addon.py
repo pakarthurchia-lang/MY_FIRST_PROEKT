@@ -27,6 +27,9 @@ WB_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "data", "wb_token.json")
 WB_REFRESH_HOST = "r-point.wb.ru"
 WB_REFRESH_PATH = "/api/v1/refresh"
 
+# Перехват PVZ-токена из запросов к point-balance.wb.ru
+WB_BALANCE_HOST = "point-balance.wb.ru"
+
 # SSO куки которые нас интересуют
 SSO_COOKIE_NAMES = {
     "__Secure-access-token",
@@ -55,6 +58,11 @@ def response(flow: http.HTTPFlow) -> None:
     # Перехватываем WB токены из r-point.wb.ru/api/v1/refresh
     if flow.request.host == WB_REFRESH_HOST and flow.request.path.startswith(WB_REFRESH_PATH):
         _handle_wb_refresh(flow)
+        return
+
+    # Перехватываем PVZ-токен из запросов к point-balance.wb.ru (x-token в заголовке запроса)
+    if flow.request.host == WB_BALANCE_HOST:
+        _handle_wb_balance_request(flow)
         return
 
     if flow.request.host != TARGET_HOST:
@@ -124,7 +132,15 @@ def _handle_pvz_auth(flow: http.HTTPFlow) -> None:
 
 
 def _handle_wb_refresh(flow: http.HTTPFlow) -> None:
-    """Сохраняет WB токены из ответа r-point.wb.ru/api/v1/refresh."""
+    """Сохраняет WB PVZ-токены из ответа r-point.wb.ru/api/v1/refresh.
+
+    r-point.wb.ru/api/v1/refresh возвращает РАЗНЫЕ токены в зависимости от
+    переданного refresh_token:
+    - Общий refresh_token → access с pid=0 (не подходит для point-balance.wb.ru)
+    - PVZ refresh_token   → access с pid=72827, xpid=50016046 (нужный)
+
+    Сохраняем ТОЛЬКО PVZ-токены (xpid != 0).
+    """
     if flow.response.status_code != 200:
         return
     try:
@@ -143,7 +159,21 @@ def _handle_wb_refresh(flow: http.HTTPFlow) -> None:
             except Exception:
                 return 0
 
-        # Читаем pickpoint_id из существующего файла
+        def _jwt_xpid(jwt):
+            try:
+                part = jwt.split(".")[1]
+                part += "=" * (4 - len(part) % 4)
+                return _json.loads(base64.b64decode(part)).get("xpid", 0)
+            except Exception:
+                return 0
+
+        xpid = _jwt_xpid(new_access)
+        if not xpid:
+            # Общий токен без PVZ-прав — не сохраняем
+            print("[ozon-addon] ℹ️ WB refresh: общий токен (pid=0), пропускаем")
+            return
+
+        # Читаем существующий файл чтобы не затереть pickpoint_id
         try:
             with open(WB_TOKEN_FILE) as f:
                 existing = _json.load(f)
@@ -156,14 +186,58 @@ def _handle_wb_refresh(flow: http.HTTPFlow) -> None:
             "exp": _jwt_exp(new_access),
             "refresh_token": new_refresh,
             "refresh_exp": _jwt_exp(new_refresh),
+            "pickpoint_id": xpid,
         }
         os.makedirs(os.path.dirname(WB_TOKEN_FILE), exist_ok=True)
         with open(WB_TOKEN_FILE, "w") as f:
             _json.dump(token_data, f, indent=2)
         os.chmod(WB_TOKEN_FILE, 0o600)
-        print("[ozon-addon] ✅ WB токены сохранены из r-point/refresh")
+        print(f"[ozon-addon] ✅ WB PVZ-токен сохранён из r-point/refresh (xpid={xpid})")
     except Exception as e:
         print(f"[ozon-addon] ❌ Ошибка при сохранении WB токена: {e}")
+
+
+def _handle_wb_balance_request(flow: http.HTTPFlow) -> None:
+    """Сохраняет PVZ-токен из заголовка x-token запросов к point-balance.wb.ru."""
+    import json as _json, base64
+    token = flow.request.headers.get("x-token", "")
+    if not token or not token.startswith("eyJ"):
+        return
+    try:
+        part = token.split(".")[1]
+        part += "=" * (4 - len(part) % 4)
+        claims = _json.loads(base64.b64decode(part))
+        xpid = claims.get("xpid", 0)
+        if not xpid:
+            return  # Общий токен без PVZ-прав, пропускаем
+
+        exp = claims.get("exp", 0)
+        if time.time() >= exp:
+            return  # Истёкший токен
+
+        try:
+            with open(WB_TOKEN_FILE) as f:
+                existing = _json.load(f)
+        except Exception:
+            existing = {}
+
+        # Обновляем только если токен новее или отличается
+        if existing.get("x_token") == token:
+            return
+
+        updated = {
+            **existing,
+            "x_token": token,
+            "exp": exp,
+            "pickpoint_id": xpid,
+        }
+        os.makedirs(os.path.dirname(WB_TOKEN_FILE), exist_ok=True)
+        with open(WB_TOKEN_FILE, "w") as f:
+            _json.dump(updated, f, indent=2)
+        os.chmod(WB_TOKEN_FILE, 0o600)
+        print(f"[ozon-addon] ✅ WB PVZ-токен сохранён из point-balance запроса (xpid={xpid})")
+    except Exception as e:
+        print(f"[ozon-addon] ❌ Ошибка при сохранении WB PVZ-токена: {e}")
 
 
 def _parse_set_cookies(response: http.Response) -> dict:

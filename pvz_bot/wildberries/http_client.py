@@ -127,8 +127,11 @@ async def _refresh_wb_token() -> str:
         raise RuntimeError("WB refresh_token истёк (90 дней)")
 
     access_token = data.get("x_token", "")
+    pickpoint_id = data.get("pickpoint_id")
     headers = {**MOBILE_HEADERS, "x-token": access_token}
-    body = {"backOffice": False, "token": refresh_token}
+    if pickpoint_id:
+        headers["x-pickpoint-external-id"] = str(pickpoint_id)
+    body = {"backoffice": False, "token": refresh_token}
 
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
         async with session.post(WB_REFRESH_URL, json=body, headers=headers) as resp:
@@ -192,18 +195,23 @@ async def _get_token() -> str:
 
 
 async def get(url: str, params: dict = None) -> dict:
-    """GET запрос к WB API. X-Token передаётся в заголовке, не логируется."""
+    """GET запрос к WB API. x-token передаётся в заголовке, не логируется."""
     token = await _get_token()
-    headers = {**HEADERS_BASE, "X-Token": token}
+    pickpoint_id = get_pickpoint_id()
+    # Content-Type не нужен для GET (только для POST refresh)
+    headers = {k: v for k, v in MOBILE_HEADERS.items() if k != "Content-Type"}
+    headers["x-token"] = token
+    if pickpoint_id:
+        headers["x-pickpoint-external-id"] = str(pickpoint_id)
 
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
         async with session.get(url, params=params, headers=headers) as resp:
             if resp.status == 401:
-                # Пробуем обновить из Safari и повторить
+                # Пробуем обновить через refresh и повторить
                 _token_cache.clear()
                 try:
                     token = await _get_token()
-                    headers["X-Token"] = token
+                    headers["x-token"] = token
                     async with session.get(url, params=params, headers=headers) as resp2:
                         resp2.raise_for_status()
                         return await resp2.json()
