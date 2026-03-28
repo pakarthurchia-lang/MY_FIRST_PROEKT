@@ -1,13 +1,14 @@
 """
 Авторизация Ozon через бот.
 
-Флоу:
-  /login → бот просит телефон → пользователь вводит → SMS → пользователь вводит код
-         → токены сохранены → бот работает без браузера
+Флоу /login (Web токен через Chrome):
+  /login → бот просит телефон → Chrome открывает id.ozon.ru →
+  → Ozon отправляет код на почту/SMS → пользователь вводит код →
+  → бот получает Web PVZ токен → reports и fines работают
 
-Работает с любого устройства (телефон, десктоп).
-Не требует Playwright, Safari, DevTools.
+Работает на Mac/Linux с установленным Chrome.
 """
+import html
 import json
 import os
 from aiogram import Router, F
@@ -34,14 +35,14 @@ async def cmd_login(message: Message, state: FSMContext):
 
     await state.clear()
 
-    # Если телефон уже есть в конфиге — сразу отправляем код
     if OZON_PHONE:
-        await _request_code(message, state, OZON_PHONE)
+        await _start_web_login(message, state, OZON_PHONE)
     else:
         await state.set_state(OzonLoginState.waiting_phone)
         await message.answer(
             "📱 <b>Авторизация Ozon</b>\n\n"
-            "Введи номер телефона или email аккаунта Ozon PVZ:",
+            "Введи номер телефона или email аккаунта Ozon PVZ\n"
+            "(например: +79991234567 или user@mail.ru):",
             parse_mode="HTML",
         )
 
@@ -50,69 +51,137 @@ async def cmd_login(message: Message, state: FSMContext):
 async def handle_phone(message: Message, state: FSMContext):
     if message.from_user.id != OWNER_CHAT_ID:
         return
-    await _request_code(message, state, message.text.strip())
+    await _start_web_login(message, state, message.text.strip())
 
 
-async def _request_code(message: Message, state: FSMContext, login: str):
-    await message.answer(f"⏳ Отправляю код на {login}...")
+async def _start_web_login(message: Message, state: FSMContext, phone: str):
+    """Запускает Chrome-логин и ждёт код."""
+    # Нормализуем телефон (email не трогаем)
+    if "@" not in phone:
+        phone = "".join(c for c in phone if c.isdigit() or c == "+")
+        if not phone.startswith("+"):
+            phone = "+7" + phone.lstrip("78") if phone.startswith(("7", "8")) else "+" + phone
+
+    await message.answer(
+        f"⏳ Открываю страницу логина Ozon для <b>{phone}</b>...\n"
+        f"(Chrome headless)",
+        parse_mode="HTML",
+    )
+
+    # Запускаем Chrome-логин
     try:
-        from ozon.login import send_login_code
-        ctx = await send_login_code(login)
-    except RuntimeError as e:
+        from ozon.web_login import login_ozon_web
+    except ImportError as e:
         await state.clear()
         await message.answer(
-            f"❌ <b>Не удалось отправить код:</b>\n\n<code>{e}</code>\n\n"
-            f"Попробуй /login снова или используй /ozon_token для ручного обновления.",
+            f"❌ <b>Chrome не настроен:</b>\n<code>{e}</code>\n\n"
+            f"Установи: pip install undetected-chromedriver",
             parse_mode="HTML",
         )
         return
 
-    await state.update_data(login_ctx=ctx)
     await state.set_state(OzonLoginState.waiting_code)
-    await message.answer(
-        f"✅ Код отправлен на <b>{login}</b>\n\n"
-        f"Введи код из SMS или email:",
-        parse_mode="HTML",
-    )
 
+    # callback — вызывается когда Chrome ждёт код
+    # Просто отправляет сообщение; реальный код берётся через _get_pending_code_sync
+    async def get_code() -> str:
+        await message.answer(
+            "📨 <b>Ozon отправил код подтверждения</b>\n\n"
+            "Введи код из SMS или email:",
+            parse_mode="HTML",
+        )
 
-@router.message(OzonLoginState.waiting_code)
-async def handle_code(message: Message, state: FSMContext):
-    if message.from_user.id != OWNER_CHAT_ID:
-        return
+    # callback — статусные сообщения
+    async def on_status(msg: str):
+        try:
+            await message.answer(f"🔄 {msg}")
+        except Exception:
+            pass
 
-    code = message.text.strip()
-    data = await state.get_data()
-    ctx = data.get("login_ctx")
-    if not ctx:
-        await state.clear()
-        await message.answer("❌ Сессия устарела. Начни заново: /login")
-        return
-
-    await message.answer("⏳ Проверяю код...")
     try:
-        from ozon.login import verify_login_code
-        token_data = await verify_login_code(ctx, code)
+        token_data = await login_ozon_web(
+            phone=phone,
+            get_code=get_code,
+            on_status=on_status,
+        )
     except RuntimeError as e:
         await state.clear()
         await message.answer(
-            f"❌ <b>Ошибка подтверждения кода:</b>\n\n<code>{e}</code>\n\n"
-            f"Попробуй /login снова.",
+            f"❌ <b>Ошибка логина:</b>\n\n<code>{html.escape(str(e))}</code>\n\n"
+            f"Попробуй /login снова или /ozon_token для ручного обновления.",
+            parse_mode="HTML",
+        )
+        return
+    except Exception as e:
+        await state.clear()
+        await message.answer(
+            f"❌ <b>Неожиданная ошибка:</b>\n\n<code>{html.escape(f'{type(e).__name__}: {e}')}</code>",
             parse_mode="HTML",
         )
         return
 
     await state.clear()
 
-    # Сбрасываем кэш токена в http_client
+    # Сбрасываем кэш токена
     from ozon import http_client
     http_client._token_data = {}
 
+    # Определяем тип токена
+    from ozon.http_client import _jwt_decode
+    claims = _jwt_decode(token_data.get("access_token", ""))
+    client_type = claims.get("ClientType", "?")
+
     await message.answer(
-        "✅ <b>Ozon авторизация успешна!</b>\n\n"
-        "Токен сохранён. Бот будет автоматически обновлять его через refresh_token.",
+        f"✅ <b>Ozon авторизация успешна!</b>\n\n"
+        f"Тип токена: <b>{client_type}</b>\n"
+        f"{'📊 Reports и прибыль доступны!' if client_type == 'Web' else '⚠️ Mobile токен — reports ограничены'}\n\n"
+        f"Токен будет автоматически обновляться.",
         parse_mode="HTML",
     )
+
+
+@router.message(OzonLoginState.waiting_code)
+async def handle_code(message: Message, state: FSMContext):
+    """Получает код от пользователя и передаёт в Chrome."""
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+
+    if not message.text:
+        # Фото/файл/стикер — игнорируем, ждём текстовый код
+        return
+
+    code = message.text.strip()
+    data = await state.get_data()
+
+    # Находим Future и устанавливаем результат
+    # Future передаётся через замыкание в _start_web_login
+    # Здесь мы не можем напрямую обратиться к Future,
+    # поэтому используем глобальный механизм
+    _set_pending_code(code)
+
+    await message.answer("⏳ Проверяю код...")
+
+
+# Механизм передачи кода между async handler и Chrome thread
+import concurrent.futures as _cf
+_code_future: "_cf.Future | None" = None
+
+
+def _set_pending_code(code: str):
+    global _code_future
+    if _code_future is not None and not _code_future.done():
+        _code_future.set_result(code)
+
+
+def _get_pending_code_sync(timeout: float = 300) -> str:
+    global _code_future
+    _code_future = _cf.Future()
+    try:
+        return _code_future.result(timeout=timeout)
+    except Exception:
+        return ""
+    finally:
+        _code_future = None
 
 
 # ── /setup — установка закладок ───────────────────────────────────────────────
@@ -141,15 +210,6 @@ async def cmd_setup(message: Message):
 
 @router.message(Command("ozon_token"))
 async def cmd_ozon_token(message: Message):
-    """
-    Ручное обновление токена.
-    Использование: /ozon_token <JSON из localStorage>
-
-    Как получить (десктоп, запасной вариант):
-    1. Открой turbo-pvz.ozon.ru в браузере
-    2. DevTools → Консоль → localStorage.getItem('pvz-access-token')
-    3. /ozon_token <вставь>
-    """
     if message.from_user.id != OWNER_CHAT_ID:
         return
 
@@ -170,7 +230,6 @@ async def cmd_ozon_token(message: Message):
 
     raw = parts[1].strip()
 
-    # Убираем обёрточные кавычки если скопировали с ними
     if raw.startswith('"') and raw.endswith('"'):
         try:
             raw = json.loads(raw)

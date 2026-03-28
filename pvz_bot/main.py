@@ -27,10 +27,16 @@ def _kill_previous():
         with open(PIDFILE) as f:
             old_pid = int(f.read().strip())
         if old_pid != os.getpid():
-            os.kill(old_pid, signal.SIGTERM)
-            logger.info(f"Остановлен предыдущий экземпляр (pid {old_pid})")
-    except (ProcessLookupError, ValueError):
-        pass  # процесс уже не существует
+            try:
+                os.kill(old_pid, signal.SIGKILL)
+                logger.info(f"Остановлен предыдущий экземпляр (pid {old_pid})")
+                # Ждём завершения чтобы освободить Telegram polling
+                import time
+                time.sleep(2)
+            except (ProcessLookupError, PermissionError):
+                pass
+    except (ValueError, OSError):
+        pass
 
 
 def _write_pid():
@@ -52,12 +58,12 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    dp.include_router(auth.router)
     dp.include_router(menu.router)
     dp.include_router(location_setup.router)
     dp.include_router(audit.router)
     dp.include_router(ym_upload.router)
     dp.include_router(wb_upload.router)
-    dp.include_router(auth.router)
     dp.include_router(claims.router)
 
     scheduler = setup_scheduler(bot)

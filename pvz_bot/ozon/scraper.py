@@ -224,10 +224,18 @@ async def get_available_reports() -> list:
     today = date.today()
     date_from = f"{today.year - 1}-01-01"
     date_to = today.isoformat()
-    data = await get(
-        f"https://turbo-pvz.ozon.ru/api2/reports/agent/reports-by-contract-ids"
-        f"?reportType=DocumentsAgentReport&dateFrom={date_from}&dateTo={date_to}"
-    )
+    try:
+        data = await get(
+            f"https://turbo-pvz.ozon.ru/api2/reports/agent/reports-by-contract-ids"
+            f"?reportType=DocumentsAgentReport&dateFrom={date_from}&dateTo={date_to}"
+        )
+    except Exception as e:
+        if "403" in str(e):
+            raise RuntimeError(
+                "Отчёты Ozon недоступны с текущим токеном.\n"
+                "Запусти /login чтобы войти снова."
+            ) from None
+        raise
     reports = data.get("reports", [])
     result = []
     for r in reports:

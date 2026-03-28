@@ -5,3 +5,5 @@ aiosqlite
 python-dotenv
 aiofiles~=23.2.1
 anthropic
+curl_cffi
+undetected-chromedriver
