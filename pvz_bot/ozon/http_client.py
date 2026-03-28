@@ -212,10 +212,12 @@ MOBILE_HEADERS = {
     "Content-Type": "application/json",
     "x-o3-app-name": "ozonpvzapp_ios",
     "x-o3-app-version": "3.50.0(609)",
+    "x-o3-version-code": "609",
     "x-operating-system": "ios",
     "x-o3-version-name": "3.50.0",
     "x-o3-fp": "0.ba55bb2ca4aca37d",
     "user-agent": "ozonpvzapp_ios_prod",
+    "accept-language": "ru-UM",
 }
 
 
@@ -230,13 +232,13 @@ async def _fetch_pvz_token_via_mobile_auth() -> dict:
         raise RuntimeError("SSO куки отсутствуют в ozon_session.json")
 
     body = {
-        "auditParameters": {
-            "machineName": "Server",
-            "userAgent": "iOS 18.5",
-            "operatingSystem": "ios",
-        },
         "domain": "ozon.ru",
-        "Authorization": [],
+        "auditParameters": {
+            "computerName": "iPhone",
+            "operationSystem": "ios",
+            "userAgent": "iOS 18.5",
+        },
+        "authorization": [],
     }
 
     async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session:
@@ -455,12 +457,17 @@ async def post(url: str, body: dict) -> dict:
 
     async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session:
         async with session.post(url, json=body, headers=headers) as resp:
-            if resp.status == 401:
-                token = await _force_renew()
-                headers["Authorization"] = f"Bearer {token}"
-                async with session.post(url, json=body, headers=headers) as resp2:
-                    return await resp2.json()
-            return await resp.json()
+            if resp.status != 401:
+                return await resp.json()
+
+    # 401 — обновляем токен и куки, создаём новую сессию
+    token = await _force_renew()
+    cookies = _get_cookies()
+    headers["Authorization"] = f"Bearer {token}"
+    async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session2:
+        async with session2.post(url, json=body, headers=headers) as resp2:
+            resp2.raise_for_status()
+            return await resp2.json()
 
 
 async def get(url: str, params: dict = None) -> dict:
@@ -470,12 +477,17 @@ async def get(url: str, params: dict = None) -> dict:
 
     async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session:
         async with session.get(url, params=params, headers=headers) as resp:
-            if resp.status == 401:
-                token = await _force_renew()
-                headers["Authorization"] = f"Bearer {token}"
-                async with session.get(url, params=params, headers=headers) as resp2:
-                    return await resp2.json()
-            return await resp.json()
+            if resp.status != 401:
+                return await resp.json()
+
+    # 401 — обновляем токен и куки, создаём новую сессию
+    token = await _force_renew()
+    cookies = _get_cookies()
+    headers["Authorization"] = f"Bearer {token}"
+    async with aiohttp.ClientSession(cookies=cookies, timeout=_TIMEOUT) as session2:
+        async with session2.get(url, params=params, headers=headers) as resp2:
+            resp2.raise_for_status()
+            return await resp2.json()
 
 
 async def get_bytes(url: str) -> bytes:
@@ -487,14 +499,20 @@ async def get_bytes(url: str) -> bytes:
     async with aiohttp.ClientSession(cookies=cookies, timeout=timeout) as session:
         async with session.get(url, headers=headers) as resp:
             if resp.status == 401:
-                token = await _force_renew()
-                headers["Authorization"] = f"Bearer {token}"
-                async with session.get(url, headers=headers) as resp2:
-                    if resp2.status != 200:
-                        text = await resp2.text()
-                        raise RuntimeError(f"Ошибка скачивания: {resp2.status} {text[:200]}")
-                    return await resp2.read()
-            if resp.status != 200:
+                pass  # выходим из сессии, обновляем ниже
+            elif resp.status != 200:
                 text = await resp.text()
                 raise RuntimeError(f"Ошибка скачивания: {resp.status} {text[:200]}")
-            return await resp.read()
+            else:
+                return await resp.read()
+
+    # 401 — обновляем токен и куки, создаём новую сессию
+    token = await _force_renew()
+    cookies = _get_cookies()
+    headers["Authorization"] = f"Bearer {token}"
+    async with aiohttp.ClientSession(cookies=cookies, timeout=timeout) as session2:
+        async with session2.get(url, headers=headers) as resp2:
+            if resp2.status != 200:
+                text = await resp2.text()
+                raise RuntimeError(f"Ошибка скачивания: {resp2.status} {text[:200]}")
+            return await resp2.read()
