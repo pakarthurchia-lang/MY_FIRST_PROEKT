@@ -117,10 +117,14 @@ def _chrome_login_sync(
 
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
+    # eager = ждём только DOM, не все ресурсы → не зависнет на медленных шрифтах/картинках
+    options.page_load_strategy = "eager"
 
     driver = None
     try:
         driver = uc.Chrome(options=options, version_main=146)
+        driver.set_page_load_timeout(60)   # макс 60 сек на загрузку страницы
+        driver.implicitly_wait(5)
 
         # Внедряем перехватчик fetch+XHR ДО любой навигации — будет работать на всех страницах
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
@@ -168,7 +172,10 @@ def _chrome_login_sync(
         # ВАЖНО: приложение само генерирует state/nonce и сохраняет в sessionStorage.
         # Если идти напрямую на id.ozon.ru — state не совпадёт при callback → обмен токена не работает.
         status("Открываю turbo-pvz.ozon.ru/login...")
-        driver.get("https://turbo-pvz.ozon.ru/login")
+        try:
+            driver.get("https://turbo-pvz.ozon.ru/login")
+        except Exception:
+            pass  # eager: TimeoutException нормален — DOM уже есть
         time.sleep(4)
 
         # Нажимаем кнопку "Войти через Ozon ID" — приложение само делает redirect на id.ozon.ru
@@ -794,11 +801,17 @@ def _chrome_login_sync(
 
             if store_uuid:
                 status(f"Перехожу на магазин из конфига: {store_uuid}")
-                driver.get(f"https://turbo-pvz.ozon.ru/{store_uuid}")
+                try:
+                    driver.get(f"https://turbo-pvz.ozon.ru/{store_uuid}")
+                except Exception:
+                    pass
             else:
                 # Идём на главную и кликаем первую ссылку с UUID-подобным href
                 status("OZON_STORE_UUID не задан — ищу магазин на главной странице...")
-                driver.get("https://turbo-pvz.ozon.ru/")
+                try:
+                    driver.get("https://turbo-pvz.ozon.ru/")
+                except Exception:
+                    pass
                 time.sleep(4)
                 clicked_store = driver.execute_script("""
                     var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -819,8 +832,9 @@ def _chrome_login_sync(
                 """)
                 status(f"Кликнул на магазин: {clicked_store}")
 
-            # Ждём новый pvz-access-token со StoreId (до 30 сек)
-            for _si in range(30):
+            # Ждём новый pvz-access-token со StoreId (до 60 сек)
+            _store_clicked = False
+            for _si in range(60):
                 time.sleep(1)
                 t = driver.execute_script("return localStorage.getItem('pvz-access-token');")
                 if t:
@@ -845,9 +859,81 @@ def _chrome_login_sync(
                             break
                     except Exception:
                         pass
+
+                cur = driver.current_url
+                # Если SPA перенаправил на /stores — кликаем по карточке через ActionChains
+                if "/stores" in cur and not _store_clicked and _si >= 2:
+                    _store_clicked = True
+                    status("Попали на /stores — кликаю на карточку магазина (ActionChains)...")
+                    time.sleep(2)  # ждём рендер карточек
+
+                    # Ищем ИНДИВИДУАЛЬНУЮ карточку магазина:
+                    # наименьший элемент содержащий "ВНУКОВСКОЕ" но НЕ "РОСТОВ"
+                    # (иначе попадаем на контейнер со всеми магазинами)
+                    store_el = driver.execute_script("""
+                        var targets = [
+                            {has: 'ВНУКОВСКОЕ', hasNot: 'РОСТОВ'},
+                            {has: 'РОСТОВ',     hasNot: 'ВНУКОВСКОЕ'},
+                        ];
+                        for (var t of targets) {
+                            var walker = document.createTreeWalker(
+                                document.body, NodeFilter.SHOW_TEXT, null, false);
+                            while (walker.nextNode()) {
+                                var node = walker.currentNode;
+                                if (!node.textContent.trim().includes(t.has)) continue;
+                                // Поднимаемся по DOM
+                                var el = node.parentElement;
+                                var best = null;
+                                for (var i = 0; i < 10; i++) {
+                                    if (!el || el === document.body) break;
+                                    var r = el.getBoundingClientRect();
+                                    var elText = el.textContent || '';
+                                    // Карточка: видима, подходящий размер, не содержит второй магазин
+                                    if (r.width > 200 && r.height > 40 &&
+                                        elText.includes(t.has) && !elText.includes(t.hasNot)) {
+                                        best = el;  // запоминаем — берём самый маленький подходящий
+                                    }
+                                    el = el.parentElement;
+                                }
+                                if (best) return best;
+                            }
+                        }
+                        return null;
+                    """)
+
+                    if store_el:
+                        try:
+                            txt = store_el.text[:80].replace("\n", " ")
+                            status(f"Нашёл карточку: '{txt}' — кликаю...")
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", store_el)
+                            time.sleep(0.5)
+                            ActionChains(driver).move_to_element(store_el).pause(0.3).click().perform()
+                            time.sleep(4)
+                            status(f"URL после клика: {driver.current_url[:80]}")
+                            # Дамп API вызовов — что сделала SPA после клика
+                            captured = driver.execute_script("return window._pvzCapture || null;")
+                            if captured:
+                                calls = captured.get("calls", [])
+                                recent = [(c.get("url","")[-70:], c.get("status"), (c.get("body") or "")[:80])
+                                          for c in calls[-6:]]
+                                status(f"API после клика: {recent}")
+                            # Проверяем обновился ли токен в localStorage
+                            new_t = driver.execute_script("return localStorage.getItem('pvz-access-token');")
+                            if new_t:
+                                try:
+                                    nd = json.loads(new_t)
+                                    nc = _jwt_decode(nd.get("access_token", ""))
+                                    status(f"Токен в LS: StoreId={nc.get('StoreId','нет')}, ClientType={nc.get('ClientType','?')}")
+                                except Exception:
+                                    pass
+                        except Exception as _ce:
+                            status(f"Ошибка клика: {_ce}")
+                    else:
+                        page_text = driver.execute_script("return document.body.innerText.slice(0, 400);")
+                        status(f"Карточка не найдена. Текст страницы:\n{page_text}")
+
                 if _si % 10 == 9:
-                    cur = driver.current_url[:80]
-                    status(f"Жду StoreId ({_si+1}с), URL: {cur}")
+                    status(f"Жду StoreId ({_si+1}с), URL: {cur[:80]}")
             else:
                 status("⚠️ StoreId не появился — сохраняю токен без StoreId (отчёты могут не работать)")
 

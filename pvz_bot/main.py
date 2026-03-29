@@ -73,8 +73,9 @@ async def main():
         await bot.send_message(
             OWNER_CHAT_ID,
             "🟢 <b>ПВЗ бот запущен!</b>\n\n"
-            "Используй /login для авторизации в Ozon\n"
-            "Затем /claims чтобы увидеть претензии\n"
+            "/login — авторизация Ozon\n"
+            "/wb_login — авторизация Wildberries\n"
+            "/claims — претензии\n"
             "/help — все команды",
             parse_mode="HTML"
         )

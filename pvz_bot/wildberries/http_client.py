@@ -190,7 +190,7 @@ async def _get_token() -> str:
 
     raise RuntimeError(
         "WB токен истёк и не удалось обновить автоматически.\n"
-        "Открой pvz-lk.wb.ru, нажми закладку «Обновить токен WB» и вставь в бота."
+        "Используй /wb_login для входа через браузер."
     )
 
 
@@ -198,21 +198,27 @@ async def get(url: str, params: dict = None) -> dict:
     """GET запрос к WB API. x-token передаётся в заголовке, не логируется."""
     token = await _get_token()
     pickpoint_id = get_pickpoint_id()
-    # Content-Type не нужен для GET (только для POST refresh)
-    headers = {k: v for k, v in MOBILE_HEADERS.items() if k != "Content-Type"}
+
+    data = _token_cache or _load_token()
+    if data.get("token_type") == "web":
+        headers = {k: v for k, v in HEADERS_BASE.items() if k != "Content-Type"}
+    else:
+        headers = {k: v for k, v in MOBILE_HEADERS.items() if k != "Content-Type"}
     headers["x-token"] = token
     if pickpoint_id:
         headers["x-pickpoint-external-id"] = str(pickpoint_id)
 
+    # wb.ru куки общие для всех поддоменов — нужны для point-balance.wb.ru
+    cookies = data.get("wb_cookies") or {}
+
     async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-        async with session.get(url, params=params, headers=headers) as resp:
+        async with session.get(url, params=params, headers=headers, cookies=cookies) as resp:
             if resp.status == 401:
-                # Пробуем обновить через refresh и повторить
                 _token_cache.clear()
                 try:
                     token = await _get_token()
                     headers["x-token"] = token
-                    async with session.get(url, params=params, headers=headers) as resp2:
+                    async with session.get(url, params=params, headers=headers, cookies=cookies) as resp2:
                         resp2.raise_for_status()
                         return await resp2.json()
                 except RuntimeError:
