@@ -39,9 +39,17 @@ class AuditState(StatesGroup):
     confirm_run        = State()  # ожидание подтверждения при неполных данных
 
 
-def _cancel_keyboard() -> InlineKeyboardMarkup:
+class ValuationState(StatesGroup):
+    choosing_month     = State()
+    entering_rent      = State()
+    entering_salary    = State()
+    entering_utilities = State()
+    entering_turnover  = State()
+
+
+def _cancel_keyboard(cancel_data: str = "audit:cancel") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="audit:cancel")]
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_data)]
     ])
 
 
@@ -52,7 +60,8 @@ def _parse_amount(text: str) -> Optional[float]:
         return None
 
 
-def _month_keyboard() -> InlineKeyboardMarkup:
+def _month_keyboard(cancel_data: str = "audit:cancel",
+                    month_prefix: str = "audit_month") -> InlineKeyboardMarkup:
     today = date.today()
     buttons = []
     m, y = today.month, today.year
@@ -62,50 +71,275 @@ def _month_keyboard() -> InlineKeyboardMarkup:
             m, y = 12, y - 1
         buttons.append([InlineKeyboardButton(
             text=f"{MONTHS_RU[m]} {y}",
-            callback_data=f"audit_month:{m}:{y}"
+            callback_data=f"{month_prefix}:{m}:{y}"
         )])
-    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="audit:cancel")])
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_data)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ── Точка входа: menu:analytics ────────────────────────────────────────────
 
 @router.callback_query(F.data == "menu:analytics")
-async def cb_analytics_locations(call: CallbackQuery, state: FSMContext):
+async def cb_analytics_menu(call: CallbackQuery, state: FSMContext):
     if call.from_user.id != OWNER_CHAT_ID:
         return
     await call.answer()
     await state.clear()
 
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Диагностика проблем", callback_data="analytics:diagnose")],
+        [InlineKeyboardButton(text="💰 Оценка бизнеса",      callback_data="analytics:valuation")],
+        [InlineKeyboardButton(text="📊 ИИ-аудит месяца",     callback_data="analytics:audit")],
+        [InlineKeyboardButton(text="◀️ Назад",               callback_data="menu:back")],
+    ])
+    await call.message.answer(
+        "🤖 <b>ИИ-аналитика</b>\n\nВыбери режим анализа:",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+
+
+async def _location_picker(call: CallbackQuery, state: FSMContext,
+                            callback_prefix: str, title: str):
+    """Общий picker локаций с заданным callback_prefix для кнопок."""
     locations = await get_all_locations()
     if not locations:
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚙️ Настроить локации", callback_data="loc:list")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")],
+            [InlineKeyboardButton(text="◀️ Назад",             callback_data="menu:analytics")],
         ])
         await call.message.answer(
-            "🤖 <b>ИИ-аналитика</b>\n\n"
-            "Сначала настрой локации ПВЗ.",
-            parse_mode="HTML",
-            reply_markup=markup,
+            f"🤖 <b>{title}</b>\n\nСначала настрой локации ПВЗ.",
+            parse_mode="HTML", reply_markup=markup,
         )
         return
 
     buttons = [
-        [InlineKeyboardButton(text=f"📍 {loc['name']}", callback_data=f"audit:{loc['id']}")]
+        [InlineKeyboardButton(text=f"📍 {loc['name']}",
+                               callback_data=f"{callback_prefix}:{loc['id']}")]
         for loc in locations
     ]
-    buttons.append([InlineKeyboardButton(text="⚙️ Локации", callback_data="loc:list")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
-
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:analytics")])
     await call.message.answer(
-        "🤖 <b>ИИ-аналитика</b>\n\nВыбери локацию для аудита:",
+        f"🤖 <b>{title}</b>\n\nВыбери локацию:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
     )
 
 
-# ── Выбор локации → выбор месяца ───────────────────────────────────────────
+@router.callback_query(F.data == "analytics:audit")
+async def cb_analytics_audit(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await _location_picker(call, state, "audit", "ИИ-аудит месяца")
+
+
+@router.callback_query(F.data == "analytics:diagnose")
+async def cb_analytics_diagnose(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await _location_picker(call, state, "diag", "Диагностика проблем")
+
+
+@router.callback_query(F.data == "analytics:valuation")
+async def cb_analytics_valuation(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await _location_picker(call, state, "val", "Оценка бизнеса")
+
+
+# ── Диагностика: выбор локации → прямой запуск ─────────────────────────────
+
+@router.callback_query(F.data.startswith("diag:"))
+async def cb_diag_pick_location(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    try:
+        location_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+
+    await call.answer()
+    location = await get_location_with_pvzs(location_id)
+    if not location:
+        await call.message.answer("❌ Локация не найдена.", reply_markup=main_menu())
+        return
+
+    await call.message.answer(
+        f"⏳ Анализирую проблемы <b>{location['name']}</b>...\n"
+        "Собираю данные по претензиям, штрафам и рейтингу.",
+        parse_mode="HTML",
+    )
+
+    try:
+        from ozon.ai_audit import get_pvz_diagnostics
+        result = await get_pvz_diagnostics(location)
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка при диагностике: {e}", reply_markup=main_menu())
+        return
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К аналитике", callback_data="menu:analytics")],
+        [InlineKeyboardButton(text="🏠 Главное меню",  callback_data="menu:back")],
+    ])
+    await call.message.answer(
+        f"🔍 <b>Диагностика: {location['name']}</b>\n\n{result}",
+        parse_mode="HTML",
+        reply_markup=back_kb,
+    )
+
+
+# ── Оценка бизнеса: выбор локации → выбор месяца ───────────────────────────
+
+@router.callback_query(F.data.startswith("val:") & ~F.data.in_({"val:cancel"}))
+async def cb_val_pick_location(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    try:
+        location_id = int(call.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+
+    await call.answer()
+    location = await get_location_with_pvzs(location_id)
+    if not location:
+        await call.message.answer("❌ Локация не найдена.", reply_markup=main_menu())
+        return
+
+    await state.update_data(location_id=location_id)
+    await state.set_state(ValuationState.choosing_month)
+
+    await call.message.answer(
+        f"📍 <b>{location['name']}</b>\n\nВыбери базовый месяц для расчёта:",
+        parse_mode="HTML",
+        reply_markup=_month_keyboard(cancel_data="val:cancel", month_prefix="val_month"),
+    )
+
+
+# ── Валюация: выбор месяца ──────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("val_month:"), ValuationState.choosing_month)
+async def cb_val_month(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    _, m_str, y_str = call.data.split(":")
+    await call.answer()
+    await state.update_data(month=int(m_str), year=int(y_str))
+    await state.set_state(ValuationState.entering_rent)
+
+    await call.message.answer(
+        f"💰 <b>Оценка бизнеса</b> — {MONTHS_RU[int(m_str)]} {y_str}\n\n"
+        "Шаг 1/4\n"
+        "💳 Введи <b>аренду</b> за месяц (руб.):",
+        parse_mode="HTML",
+        reply_markup=_cancel_keyboard(cancel_data="val:cancel"),
+    )
+
+
+@router.message(ValuationState.entering_rent)
+async def val_entering_rent(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    amount = _parse_amount(message.text or "")
+    if amount is None:
+        await message.answer("❌ Введи число, например: <code>50000</code>",
+                             parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+        return
+    await state.update_data(rent=amount)
+    await state.set_state(ValuationState.entering_salary)
+    await message.answer("Шаг 2/4\n👷 Введи <b>ФОТ</b> за месяц (руб.):",
+                         parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+
+
+@router.message(ValuationState.entering_salary)
+async def val_entering_salary(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    amount = _parse_amount(message.text or "")
+    if amount is None:
+        await message.answer("❌ Введи число, например: <code>80000</code>",
+                             parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+        return
+    await state.update_data(salary=amount)
+    await state.set_state(ValuationState.entering_utilities)
+    await message.answer("Шаг 3/4\n💡 Введи <b>коммуналку</b> за месяц (руб.):",
+                         parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+
+
+@router.message(ValuationState.entering_utilities)
+async def val_entering_utilities(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    amount = _parse_amount(message.text or "")
+    if amount is None:
+        await message.answer("❌ Введи число, например: <code>10000</code>",
+                             parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+        return
+    await state.update_data(utilities=amount)
+    await state.set_state(ValuationState.entering_turnover)
+    await message.answer("Шаг 4/4\n💼 Введи <b>общий товарооборот</b> за месяц (руб.):",
+                         parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+
+
+@router.message(ValuationState.entering_turnover)
+async def val_entering_turnover(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    amount = _parse_amount(message.text or "")
+    if amount is None:
+        await message.answer("❌ Введи число, например: <code>1500000</code>",
+                             parse_mode="HTML", reply_markup=_cancel_keyboard("val:cancel"))
+        return
+
+    data = await state.get_data()
+    expenses = {
+        "rent": data["rent"], "salary": data["salary"],
+        "utilities": data["utilities"], "turnover": amount,
+    }
+    await state.clear()
+
+    location = await get_location_with_pvzs(data["location_id"])
+    if not location:
+        await message.answer("❌ Локация не найдена.", reply_markup=main_menu())
+        return
+
+    month, year = data["month"], data["year"]
+    await message.answer(
+        f"⏳ Рассчитываю стоимость бизнеса за {MONTHS_RU[month]} {year}...\n"
+        "Собираю данные за все доступные месяцы."
+    )
+
+    try:
+        from ozon.ai_audit import get_pvz_valuation
+        result = await get_pvz_valuation(location, expenses, month, year)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=main_menu())
+        return
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К аналитике", callback_data="menu:analytics")],
+        [InlineKeyboardButton(text="🏠 Главное меню",  callback_data="menu:back")],
+    ])
+    await message.answer(
+        f"💰 <b>Оценка бизнеса: {location['name']}</b>\n\n{result}",
+        parse_mode="HTML",
+        reply_markup=back_kb,
+    )
+
+
+@router.callback_query(F.data == "val:cancel")
+async def cb_val_cancel(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await state.clear()
+    await call.message.answer("Отменено.", reply_markup=main_menu())
+
+
+# ── Аудит: выбор локации → выбор месяца ────────────────────────────────────
 
 @router.callback_query(F.data.startswith("audit:") & ~F.data.in_({"audit:cancel", "audit:run"}))
 async def cb_audit_pick_location(call: CallbackQuery, state: FSMContext):

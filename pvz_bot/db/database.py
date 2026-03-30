@@ -172,6 +172,28 @@ async def upsert_claim(claim: dict):
         await db.commit()
 
 
+async def get_claims_history(pvz_names: list = None, limit: int = 100) -> list:
+    """Возвращает все претензии (включая закрытые), опционально фильтруя по pvz_names."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if pvz_names:
+            placeholders = ",".join("?" * len(pvz_names))
+            async with db.execute(f"""
+                SELECT * FROM claims
+                WHERE pvz IN ({placeholders})
+                ORDER BY date_issued DESC
+                LIMIT ?
+            """, (*pvz_names, limit)) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+        else:
+            async with db.execute("""
+                SELECT * FROM claims
+                ORDER BY date_issued DESC
+                LIMIT ?
+            """, (limit,)) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+
 async def get_active_claims() -> list:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
