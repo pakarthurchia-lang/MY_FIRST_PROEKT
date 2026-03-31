@@ -125,6 +125,15 @@ async def verify_code(session_token: str, sms_code: str) -> dict:
 
 
 def _save_token(data: dict):
+    # Не перезаписывать PVZ-токен (xpid != 0) общим токеном (xpid == 0)
+    if not data.get("pickpoint_id"):
+        try:
+            with open(TOKEN_FILE) as f:
+                existing = json.load(f)
+            if existing.get("pickpoint_id"):
+                return  # уже есть PVZ-токен — не трогаем
+        except Exception:
+            pass
     os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         json.dump(data, f, indent=2)

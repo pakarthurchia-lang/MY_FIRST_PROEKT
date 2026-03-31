@@ -98,6 +98,103 @@ async def _get_redirect_token() -> str:
         return ""
 
 
+def _try_extract_pvz_token(driver, status_fn) -> dict:
+    """Пробует достать PVZ токен из localStorage. Возвращает dict или None."""
+    try:
+        token_json = driver.execute_script("return localStorage.getItem('pvz-access-token');")
+        if not token_json:
+            # Ищем по всем ключам localStorage
+            all_ls = driver.execute_script("""
+                var res = {};
+                for (var i = 0; i < localStorage.length; i++) {
+                    var k = localStorage.key(i);
+                    var v = localStorage.getItem(k);
+                    if (v && (v.startsWith('eyJ') || (v.startsWith('{') && v.includes('access_token')))) res[k] = v;
+                }
+                return res;
+            """) or {}
+            if all_ls:
+                status_fn(f"localStorage ключи с токеном: {list(all_ls.keys())}")
+                for k, v in all_ls.items():
+                    if v.startswith("eyJ"):
+                        token_json = json.dumps({"access_token": v})
+                        break
+                    elif v.startswith("{"):
+                        token_json = v
+                        break
+
+        if not token_json:
+            return None
+
+        try:
+            parsed = json.loads(token_json)
+        except Exception:
+            parsed = {"access_token": token_json}
+
+        access = parsed.get("access_token") or parsed.get("token")
+        if not access:
+            return None
+
+        claims = _jwt_decode(access)
+        exp = claims.get("exp", 0)
+        refresh = parsed.get("refresh_token") or parsed.get("refreshToken", "")
+        refresh_claims = _jwt_decode(refresh) if refresh else {}
+
+        token_data = {
+            "access_token": access,
+            "refresh_token": refresh,
+            "expire_time": exp * 1000 if exp else int(time.time() + 13 * 3600) * 1000,
+            "refresh_expire_time": refresh_claims.get("exp", 0) * 1000,
+        }
+        _save_pvz_token(token_data)
+        status_fn(f"✅ PVZ токен извлечён из localStorage (exp={exp})")
+        return token_data
+    except Exception as e:
+        status_fn(f"_try_extract_pvz_token: {e}")
+        return None
+
+
+def _inject_sso_cookies(driver, status_fn):
+    """Инжектирует SSO куки из ozon_session.json в Chrome через CDP (без navigate)."""
+    try:
+        from config import OZON_SESSION_FILE
+        session_file = OZON_SESSION_FILE
+    except (ImportError, AttributeError):
+        session_file = "data/ozon_session.json"
+
+    try:
+        with open(session_file) as f:
+            state = json.load(f)
+        cookies = state.get("cookies", [])
+        if not cookies:
+            status_fn("SSO куки не найдены в ozon_session.json")
+            return
+
+        added = 0
+        for c in cookies:
+            try:
+                cdp_cookie = {
+                    "name":     c["name"],
+                    "value":    c["value"],
+                    "domain":   c.get("domain", ".ozon.ru"),
+                    "path":     c.get("path", "/"),
+                    "secure":   c.get("secure", True),
+                    "httpOnly": c.get("httpOnly", False),
+                }
+                if c.get("expires"):
+                    cdp_cookie["expires"] = int(c["expires"])
+                driver.execute_cdp_cmd("Network.setCookie", cdp_cookie)
+                added += 1
+            except Exception:
+                pass
+
+        status_fn(f"Инжектировано {added}/{len(cookies)} SSO кук через CDP")
+    except FileNotFoundError:
+        status_fn("ozon_session.json не найден — логин потребует ввода кода")
+    except Exception as e:
+        status_fn(f"Ошибка инжекции кук: {e}")
+
+
 def _chrome_login_sync(
     phone: str,
     loop: asyncio.AbstractEventLoop,
@@ -168,6 +265,10 @@ def _chrome_login_sync(
             """
         })
 
+        # Инжектируем SSO куки из ozon_session.json ДО навигации
+        # Для add_cookie нужен navigate на тот же домен → открываем пустую страницу ozon.ru
+        _inject_sso_cookies(driver, status)
+
         # Step 0: Открываем turbo-pvz.ozon.ru/login и нажимаем "Войти через Ozon ID"
         # ВАЖНО: приложение само генерирует state/nonce и сохраняет в sessionStorage.
         # Если идти напрямую на id.ozon.ru — state не совпадёт при callback → обмен токена не работает.
@@ -205,35 +306,53 @@ def _chrome_login_sync(
             """)
         status(f"Нажата кнопка: '{clicked}' — жду перехода на id.ozon.ru...")
 
-        # Ждём пока Chrome окажется на id.ozon.ru ИЛИ sso.ozon.ru
-        # Кнопка может редиректить сначала на sso.ozon.ru/auth/ozonid, потом на id.ozon.ru
-        _on_login_page = False
+        # Ждём: либо SSO вернул нас обратно на turbo-pvz.ozon.ru (авто-логин),
+        # либо нас отправили на id.ozon.ru/sso.ozon.ru (нужен ввод кода)
         for _ in range(30):
             time.sleep(1)
             cur = driver.current_url
-            if "id.ozon.ru" in cur or ("sso.ozon.ru" in cur and "auth" in cur):
-                _on_login_page = True
+            if "turbo-pvz.ozon.ru" in cur and "/login" not in cur:
+                # SSO куки сработали — уже залогинены, токен в localStorage
+                status(f"✅ SSO авто-логин: {cur[:80]}")
                 break
-        if not _on_login_page:
-            status(f"Не перешёл на id.ozon.ru/sso.ozon.ru — текущий URL: {driver.current_url[:80]}")
-            raise RuntimeError(
-                f"Chrome не перешёл на страницу Ozon ID после нажатия кнопки.\n"
-                f"URL: {driver.current_url[:100]}"
-            )
+            if "id.ozon.ru" in cur or ("sso.ozon.ru" in cur and "auth" in cur):
+                status(f"Переход на страницу входа: {cur[:80]}")
+                break
 
-        # Если на sso.ozon.ru — ждём редиректа на id.ozon.ru (sso может само редиректить)
+        cur_url = driver.current_url
+
+        # Проверяем: может уже вернулись на turbo-pvz.ozon.ru (SSO сработал)
+        if "turbo-pvz.ozon.ru" in cur_url and "/login" not in cur_url:
+            status("SSO куки приняты — пробую достать токен из localStorage...")
+            time.sleep(3)
+            token_data = _try_extract_pvz_token(driver, status)
+            if token_data:
+                return token_data
+            # Если токен не нашли — возможно нужно выбрать магазин (страница /stores)
+            status(f"Токен не найден сразу — URL: {cur_url[:80]}, продолжаю...")
+
+        # Если всё ещё на sso.ozon.ru — ждём редиректа на id.ozon.ru
         if "sso.ozon.ru" in driver.current_url:
-            status(f"На sso.ozon.ru: {driver.current_url[:80]} — жду перехода на id.ozon.ru...")
-            for _ in range(10):
+            status(f"На sso.ozon.ru: {driver.current_url[:80]} — жду id.ozon.ru...")
+            for _ in range(8):
                 time.sleep(1)
-                if "id.ozon.ru" in driver.current_url:
+                if "id.ozon.ru" in driver.current_url or "turbo-pvz.ozon.ru" in driver.current_url:
                     break
-            status(f"URL после ожидания: {driver.current_url[:80]}")
+            cur_url = driver.current_url
+            status(f"URL после ожидания: {cur_url[:80]}")
+
+            # Если вернулись на turbo-pvz после sso — пробуем извлечь токен
+            if "turbo-pvz.ozon.ru" in cur_url:
+                time.sleep(3)
+                token_data = _try_extract_pvz_token(driver, status)
+                if token_data:
+                    return token_data
 
         time.sleep(2)
-        status(f"На странице входа: {driver.current_url[:80]}")
+        cur_url = driver.current_url
+        status(f"На странице входа: {cur_url[:80]}")
 
-        # Step 1: Получаем email
+        # Получаем email
         email = phone if "@" in phone else ""
         if not email:
             try:
@@ -247,50 +366,61 @@ def _chrome_login_sync(
                 "Добавь OZON_EMAIL=твой@email.com в .env"
             )
 
-        # Step 2: Переключаемся на email-форму
+        # Переключаемся на вход по почте (кнопка есть и на sso.ozon.ru и на id.ozon.ru)
         from selenium.webdriver.common.action_chains import ActionChains
         status("Переключаюсь на вход по почте...")
         try:
             email_btn = WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located(
-                    (By.XPATH, "//button[contains(., 'почте') or contains(., 'Почте')]")
+                    (By.XPATH, "//button[contains(., 'почте') or contains(., 'Почте') or contains(., 'email') or contains(., 'Email')]"
+                               " | //a[contains(., 'почте') or contains(., 'email') or contains(., 'e-mail')]")
                 )
             )
             ActionChains(driver).move_to_element(email_btn).click().perform()
             time.sleep(2)
             status("Форма email открыта")
         except Exception:
-            status("Кнопка 'по почте' не найдена — уже на email форме")
+            status("Кнопка 'по почте' не найдена — пробую JS поиск...")
+            clicked = driver.execute_script("""
+                var texts = ['sign in by email', 'войти по почте', 'по почте', 'e-mail', 'email'];
+                var els = Array.from(document.querySelectorAll('button, a, span'));
+                for (var t of texts) {
+                    for (var el of els) {
+                        if (el.textContent.toLowerCase().includes(t)) {
+                            var r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) { el.click(); return el.textContent.trim().slice(0,50); }
+                        }
+                    }
+                }
+                return null;
+            """)
+            if clicked:
+                status(f"JS клик по '{clicked}'")
+                time.sleep(2)
 
-        # Step 4: Вводим email
-        status("Ввожу email...")
-        # Ждём пока появится email-инпут (React делает transition после клика)
-        time.sleep(2)
+        # Ждём email инпут (не tel, не filter)
+        status("Жду email инпут...")
         try:
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR,
-                    "input:not([type='hidden']):not([type='tel'])"))
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "input[type='email'], input[type='text']:not([name='filter']):not([name='autocomplete'])")
+                )
             )
         except Exception:
             pass
         time.sleep(1)
 
-        # Проверяем что инпут есть (диагностика)
+        # Диагностика
         all_inp = driver.find_elements(By.TAG_NAME, "input")
-        inp_dump = [{
-            "type": i.get_attribute("type"),
-            "name": i.get_attribute("name"),
-            "inputmode": i.get_attribute("inputmode"),
-            "displayed": i.is_displayed(),
-        } for i in all_inp]
-        status(f"Inputs after email form: {inp_dump}")
+        inp_dump = [{"type": i.get_attribute("type"), "name": i.get_attribute("name"), "displayed": i.is_displayed()} for i in all_inp]
+        status(f"Inputs: {inp_dump}")
 
-        # Вводим email ПОЛНОСТЬЮ через JS — без Selenium WebElement reference
-        # (избегаем StaleElementReferenceException при React re-render)
+        # Вводим email через JS — только в email/text инпут, НЕ в tel/filter
+        status(f"Ввожу email: {email[:15]}...")
         typed = driver.execute_script("""
             function findEmailInput(root) {
-                var selectors = ['input[type="email"]', 'input[type="text"]',
-                    'input:not([type="hidden"]):not([type="tel"]):not([type="number"])'];
+                var selectors = ['input[type="email"]',
+                    'input[type="text"]:not([name="filter"]):not([name="autocomplete"])'];
                 for (var sel of selectors) {
                     var inputs = root.querySelectorAll(sel);
                     for (var inp of inputs) {
@@ -311,7 +441,6 @@ def _chrome_login_sync(
             if (!inp) return false;
             inp.focus();
             inp.value = '';
-            // Симулируем нативный ввод для React
             var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
                 window.HTMLInputElement.prototype, 'value').set;
             nativeInputValueSetter.call(inp, arguments[0]);
@@ -349,11 +478,19 @@ def _chrome_login_sync(
         """)
         time.sleep(5)
 
-        # Step 4: Ждём поле для кода
+        # Step 4: Ждём поле для кода (поддержка RU + EN интерфейса)
         status("Ожидаю код подтверждения...")
+        _CODE_KW = (
+            # Русский интерфейс
+            "код", "введите код", "код отправлен", "код выслан",
+            # Английский интерфейс
+            "code has been sent", "enter the code", "enter code",
+            "check your email", "we sent", "verification code",
+        )
         try:
             WebDriverWait(driver, 25).until(
-                lambda d: "код" in d.find_element(By.TAG_NAME, "body").text.lower()
+                lambda d: any(kw in d.find_element(By.TAG_NAME, "body").text.lower()
+                              for kw in _CODE_KW)
             )
         except Exception:
             body_text = driver.find_element(By.TAG_NAME, "body").text[:300]
@@ -361,14 +498,17 @@ def _chrome_login_sync(
         time.sleep(1)
 
         # Step 5: Получаем код от пользователя
-        # Отправляем сообщение в бот через async callback
         asyncio.run_coroutine_threadsafe(get_code(), loop)
-        # Ждём код через threading Event (из auth.py handler)
         from bot.handlers.auth import _get_pending_code_sync
         code = _get_pending_code_sync(timeout=300)
 
         if not code or not code.strip():
-            raise RuntimeError("Код не получен")
+            raise RuntimeError("Код не получен (таймаут 5 мин)")
+
+        # Нормализуем код: убираем пробелы, тире, буквы O→0
+        code = code.strip().replace(" ", "").replace("-", "").replace("O", "0").replace("o", "0")
+        if not code.isdigit():
+            raise RuntimeError(f"Код должен содержать только цифры, получено: '{code}'")
 
         status("Ввожу код...")
 
@@ -417,6 +557,33 @@ def _chrome_login_sync(
         if not typed_code:
             all_inp = driver.find_elements(By.TAG_NAME, "input")
             raise RuntimeError(f"Поле для кода не найдено\nURL:{driver.current_url[:80]}\nInputs:{[(i.get_attribute('type'), i.is_displayed()) for i in all_inp]}")
+
+        # Проверяем что страница не показала ошибку сразу
+        time.sleep(2)
+        _WRONG_CODE_KW = (
+            "неверный код", "неправильный код", "код недействителен", "истёк", "истек",
+            "invalid code", "wrong code", "incorrect code", "code expired", "try again",
+        )
+        _body_after_code = driver.find_element(By.TAG_NAME, "body").text.lower()
+        if any(kw in _body_after_code for kw in _WRONG_CODE_KW):
+            # Даём одну попытку переввода
+            if on_status:
+                asyncio.run_coroutine_threadsafe(
+                    on_status("❌ Неверный код. Проверь email и введи снова:"), loop
+                )
+            new_code = _get_pending_code_sync(timeout=120)
+            if new_code and new_code.strip():
+                code = new_code.strip().replace(" ", "").replace("-", "").replace("O", "0")
+                driver.execute_script("""
+                    var inp = document.querySelector('input:not([type="hidden"])');
+                    if (inp) {
+                        var s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+                        s.call(inp, arguments[0]);
+                        inp.dispatchEvent(new Event('input',{bubbles:true}));
+                        inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true}));
+                    }
+                """, code)
+                time.sleep(2)
 
         # Step 6: Ждём редирект на turbo-pvz.ozon.ru + параллельно проверяем localStorage
         # Обрабатываем промежуточную страницу "новое устройство" (otpResponseToken)
@@ -556,7 +723,8 @@ def _chrome_login_sync(
                 from bot.handlers.auth import _get_pending_code_sync
                 sms_code = _get_pending_code_sync(timeout=300)
                 if not sms_code or not sms_code.strip():
-                    raise RuntimeError("SMS код не получен")
+                    raise RuntimeError("SMS код не получен (таймаут 5 мин)")
+                sms_code = sms_code.strip().replace(" ", "").replace("-", "").replace("O", "0")
 
                 # Вводим SMS код — повторяем при необходимости
                 for _sms_attempt in range(3):
@@ -598,7 +766,8 @@ def _chrome_login_sync(
                         # Кликаем кнопку подтверждения
                         driver.execute_script("""
                             var btns = document.querySelectorAll('button');
-                            var keywords = ['войти', 'подтвердить', 'confirm', 'отправить'];
+                            var keywords = ['войти', 'подтвердить', 'продолжить', 'отправить',
+                                            'confirm', 'continue', 'verify', 'submit', 'sign in'];
                             for (var kw of keywords) {
                                 for (var b of btns) {
                                     if (b.textContent.toLowerCase().includes(kw)) {
@@ -607,7 +776,7 @@ def _chrome_login_sync(
                                     }
                                 }
                             }
-                            // Fallback: Enter
+                            // Fallback: Enter на активном элементе
                             document.activeElement && document.activeElement.dispatchEvent(
                                 new KeyboardEvent('keydown', {key:'Enter', keyCode:13, bubbles:true}));
                         """)
@@ -630,11 +799,11 @@ def _chrome_login_sync(
                         status("Поле SMS не найдено")
                         break
         else:
-            page_source = driver.page_source
-            if "Неверный код" in page_source or "неправильный" in page_source.lower():
-                raise RuntimeError("Неверный код подтверждения")
+            page_source = driver.page_source.lower()
+            if any(kw in page_source for kw in ("неверный код", "неправильный", "invalid code", "wrong code", "incorrect")):
+                raise RuntimeError("Неверный код подтверждения — проверь что ввёл последний код из письма")
             raise RuntimeError(
-                f"Редирект на turbo-pvz.ozon.ru не произошёл. URL: {driver.current_url[:100]}"
+                f"Редирект на turbo-pvz.ozon.ru не произошёл за 2 минуты.\nURL: {driver.current_url[:100]}"
             )
 
         # Step 7: Берём токен (уже найден в шаге 6 или ждём ещё)

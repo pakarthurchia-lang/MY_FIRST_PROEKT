@@ -340,8 +340,12 @@ async def _renew_token() -> dict:
         result = await _refresh_via_mobile_token()
         print("✅ Ozon PVZ токен обновлён через refresh_token")
         return _check_store_id(result)
-    except RuntimeError:
-        raise
+    except RuntimeError as e:
+        # Пробрасываем только ошибку "Web токен с StoreId истёк" — она от _check_store_id
+        # Остальные RuntimeError (нет refresh_token, 401 и т.д.) — пробуем следующий способ
+        if "Web токен" in str(e) or "StoreId" in str(e):
+            raise
+        print(f"⚠️ Mobile refresh: {e}")
     except Exception as e:
         print(f"⚠️ Mobile refresh: {e}")
 
@@ -350,8 +354,10 @@ async def _renew_token() -> dict:
         result = await _fetch_pvz_token_via_mobile_auth()
         print("✅ Ozon PVZ токен обновлён через ozonIdCookie/V3")
         return _check_store_id(result)
-    except RuntimeError:
-        raise
+    except RuntimeError as e:
+        if "Web токен" in str(e) or "StoreId" in str(e):
+            raise
+        print(f"⚠️ ozonIdCookie/V3: {e}")
     except Exception as e:
         print(f"⚠️ ozonIdCookie/V3: {e}")
 
@@ -362,8 +368,10 @@ async def _renew_token() -> dict:
             result = await _fetch_pvz_token_via_mobile_auth()
             print("✅ Ozon PVZ токен обновлён через ozonIdCookie/V3 (после SSO refresh)")
             return _check_store_id(result)
-        except RuntimeError:
-            raise
+        except RuntimeError as e:
+            if "Web токен" in str(e) or "StoreId" in str(e):
+                raise
+            print(f"⚠️ ozonIdCookie/V3 после SSO refresh: {e}")
         except Exception as e:
             print(f"⚠️ ozonIdCookie/V3 после SSO refresh: {e}")
 
@@ -376,8 +384,9 @@ async def _renew_token() -> dict:
             return _check_store_id(result)
         elif result.get("access_token"):
             print("⚠️ Safari localStorage: токен уже истёк")
-    except RuntimeError:
-        raise
+    except RuntimeError as e:
+        if "Web токен" in str(e) or "StoreId" in str(e):
+            raise
     except Exception:
         pass
 

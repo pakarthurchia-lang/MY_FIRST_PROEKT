@@ -40,8 +40,9 @@ async def fetch_all_payments(pickpoint_id: int) -> list:
     all_payments = []
     offset = 0
     page_size = 50
+    max_payments = 600  # не более ~12 лет истории
 
-    while True:
+    while offset < max_payments:
         batch = await _fetch_payments_page(pickpoint_id, limit=page_size, offset=offset)
         if not batch:
             break
@@ -78,8 +79,8 @@ def _parse_week(payment: dict) -> dict:
     turnover = (payment.get("total_turnover") or {}).get("base", 0) or 0
 
     return {
-        "date_from": payment["date_from"],
-        "date_to": payment["date_to"],
+        "date_from": payment.get("date_from", ""),
+        "date_to": payment.get("date_to", ""),
         "revenue": round(revenue, 2),
         "fines": round(fines, 2),
         "net": round(payment.get("total", 0) or 0, 2),

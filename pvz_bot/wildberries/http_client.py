@@ -140,8 +140,11 @@ async def _refresh_wb_token() -> str:
                 raise RuntimeError(f"WB refresh вернул {resp.status}: {text[:200]}")
             result = await resp.json()
 
-    new_access = result["access"]["token"]
-    new_refresh = result["refresh"]["token"]
+    try:
+        new_access = result["access"]["token"]
+        new_refresh = result["refresh"]["token"]
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"WB refresh: неожиданный формат ответа: {json.dumps(result)[:200]}") from e
 
     updated = {
         **data,
