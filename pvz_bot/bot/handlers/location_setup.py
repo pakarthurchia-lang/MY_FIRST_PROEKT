@@ -24,6 +24,7 @@ class LocationSetupState(StatesGroup):
     entering_name = State()
     choosing_pvzs = State()
     confirm_delete = State()
+    renaming = State()
 
 
 # ── Загрузка доступных ПВЗ ─────────────────────────────────────────────────
@@ -110,12 +111,15 @@ async def show_locations_list(target, text: str = "📍 <b>Локации ПВЗ
     buttons = []
     for loc in locations:
         buttons.append([
-            InlineKeyboardButton(text=loc["name"], callback_data=f"loc:edit:{loc['id']}"),
-            InlineKeyboardButton(text="✏️", callback_data=f"loc:edit:{loc['id']}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"loc:del:{loc['id']}"),
+            InlineKeyboardButton(text=f"📍 {loc['name']}", callback_data=f"loc:edit:{loc['id']}"),
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="📦 ПВЗ",   callback_data=f"loc:edit:{loc['id']}"),
+            InlineKeyboardButton(text="✏️ Назв.",  callback_data=f"loc:rename:{loc['id']}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"loc:del:{loc['id']}"),
         ])
     buttons.append([InlineKeyboardButton(text="➕ Добавить локацию", callback_data="loc:new")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:back")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu:analytics")])
 
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
     if isinstance(target, CallbackQuery):
@@ -220,6 +224,51 @@ async def cb_loc_del_ok(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.answer("✅ Локация удалена.")
     await show_locations_list(call)
+
+
+@router.callback_query(F.data.startswith("loc:rename:"))
+async def cb_loc_rename(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    location_id = int(call.data.split(":")[2])
+    loc = await get_location(location_id)
+    if not loc:
+        await call.message.answer("Локация не найдена.")
+        return
+    await state.set_state(LocationSetupState.renaming)
+    await state.update_data(rename_location_id=location_id)
+    await call.message.answer(
+        f"✏️ Введи новое название для локации <b>{loc['name']}</b>:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="loc:cancel")]
+        ]),
+    )
+
+
+@router.message(LocationSetupState.renaming)
+async def fsm_renaming(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    name = message.text.strip() if message.text else ""
+    if not name:
+        await message.answer("Название не может быть пустым. Введи новое название:")
+        return
+    data = await state.get_data()
+    location_id = data["rename_location_id"]
+    try:
+        await update_location_name(location_id, name)
+    except Exception as e:
+        err_str = str(e)
+        if "UNIQUE" in err_str or "unique" in err_str:
+            await message.answer("⚠️ Такое название уже есть. Введи другое:")
+            return
+        await message.answer(f"❌ Ошибка: {e}")
+        return
+    await state.clear()
+    await message.answer(f"✅ Локация переименована в <b>{name}</b>.", parse_mode="HTML")
+    await show_locations_list(message)
 
 
 @router.callback_query(F.data == "loc:cancel")

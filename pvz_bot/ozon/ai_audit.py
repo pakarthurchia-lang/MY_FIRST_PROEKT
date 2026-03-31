@@ -150,10 +150,11 @@ async def get_pvz_audit(location: dict, expenses: dict, month: int, year: int) -
     return message.content[0].text
 
 
-async def get_pvz_diagnostics(location: dict) -> str:
+async def get_pvz_diagnostics(location: dict, expenses: dict = None) -> str:
     """
     Собирает все данные по претензиям, штрафам и аналитике и просит Claude
     найти систематические нарушения с конкретными рекомендациями.
+    expenses = {rent, salary, utilities, internet, cleaning, other}
     """
     ozon_pvzs = [p for p in location["pvzs"] if p["platform"] == "ozon"]
     ym_pvzs   = [p for p in location["pvzs"] if p["platform"] == "ym"]
@@ -236,6 +237,7 @@ async def get_pvz_diagnostics(location: dict) -> str:
     prompt = _build_diagnostics_prompt(
         location, claims, ozon_analytics, ozon_fines_trend,
         wb_fines_history, ym_fines_history,
+        expenses=expenses or {},
     )
 
     client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -350,13 +352,28 @@ def _build_diagnostics_prompt(
     ozon_fines_trend: list,
     wb_fines_history: dict,
     ym_fines_history: dict,
+    expenses: dict = None,
 ) -> str:
+    expenses = expenses or {}
     lines = [
         "Ты эксперт по операционному управлению ПВЗ маркетплейсов.",
-        "Проанализируй данные о штрафах и претензиях и найди КОНКРЕТНЫЕ систематические нарушения.",
+        "Проанализируй данные о штрафах, претензиях и расходах. Найди КОНКРЕТНЫЕ систематические нарушения и дай рекомендации по снижению расходов.",
         "НЕ используй общие фразы. Называй конкретный вид нарушения, его частоту, денежный ущерб и точные шаги для исправления.",
         f"\nЛокация: {location['name']}",
     ]
+
+    # Расходы
+    expense_labels = {
+        "rent": "Аренда", "salary": "Зарплата/ФОТ", "utilities": "Коммуналка",
+        "internet": "Интернет", "cleaning": "Уборка", "other": "Прочие",
+    }
+    if expenses:
+        total_exp = sum(expenses.get(k, 0) for k in expense_labels)
+        lines.append(f"\nЕЖЕМЕСЯЧНЫЕ РАСХОДЫ (итого: {total_exp:,.0f} руб.):")
+        for key, label in expense_labels.items():
+            val = expenses.get(key, 0)
+            if val > 0:
+                lines.append(f"  {label}: {val:,.0f} руб.")
 
     # Претензии из БД
     if claims:
@@ -417,15 +434,16 @@ def _build_diagnostics_prompt(
 
     lines += [
         "",
-        "ЗАДАЧА: найди КОНКРЕТНЫЕ систематические нарушения и причины потерь прибыли.",
+        "ЗАДАЧА: найди КОНКРЕТНЫЕ систематические нарушения, причины потерь прибыли и возможности снижения расходов.",
         "",
-        "ФОРМАТ ОТВЕТА (до 300 слов, без воды):",
-        "🔍 Главные проблемы: [топ-3 нарушения с суммой ущерба]",
+        "ФОРМАТ ОТВЕТА (до 400 слов, без воды):",
+        "🔍 Главные проблемы со штрафами: [топ-3 нарушения с суммой ущерба]",
         "📌 По каждой проблеме:",
         "   — Вид нарушения и как часто повторяется",
-        "   — Вероятная причина (например: конкретный сотрудник в конкретную смену, процессная ошибка при приёмке)",
-        "   — Конкретное решение (что именно сделать, например: ввести видеофиксацию вскрытия, изменить инструкцию приёмки возвратов)",
+        "   — Вероятная причина",
+        "   — Конкретное решение",
         "   — Ожидаемое снижение штрафов в руб./мес.",
+        "💰 Анализ расходов: какие статьи выглядят завышенными для ПВЗ данного масштаба, где можно сэкономить",
         "⚡ Быстрые победы: что можно исправить за неделю",
     ]
 
