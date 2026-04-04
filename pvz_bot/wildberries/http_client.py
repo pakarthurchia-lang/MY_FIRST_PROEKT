@@ -159,6 +159,42 @@ async def _refresh_wb_token() -> str:
     return new_access
 
 
+async def _fetch_pvz_address() -> None:
+    """Подтягивает адрес ПВЗ из payments API и сохраняет в токен (один раз)."""
+    global _token_cache
+    data = _token_cache or _load_token()
+    if data.get("pvz_address"):
+        return  # уже есть
+    pickpoint_id = data.get("pickpoint_id")
+    if not pickpoint_id:
+        return
+    try:
+        params = {"limit": 1, "offset": 0, "pickpoint_id": pickpoint_id}
+        token = data.get("x_token", "")
+        headers = {**MOBILE_HEADERS, "x-token": token,
+                   "x-pickpoint-external-id": str(pickpoint_id)}
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            async with session.get(
+                "https://point-balance.wb.ru/s3/api/v2/partner-payments",
+                params=params, headers=headers,
+            ) as resp:
+                if resp.status != 200:
+                    return
+                result = await resp.json()
+        payments = result.get("payments", [])
+        for p in payments:
+            pp = p.get("pickpoint_payments") or []
+            if pp and pp[0].get("address"):
+                address = pp[0]["address"]
+                updated = {**data, "pvz_address": address}
+                _save_token(updated)
+                _token_cache = updated
+                print(f"✅ WB адрес ПВЗ сохранён: {address}")
+                return
+    except Exception as e:
+        print(f"⚠️ WB адрес ПВЗ не получен: {e}")
+
+
 async def _get_token() -> str:
     """
     Возвращает актуальный X-Token.
@@ -173,6 +209,9 @@ async def _get_token() -> str:
         _token_cache = _load_token()
 
     if _token_cache.get("x_token") and not _is_expired(_token_cache):
+        if not _token_cache.get("pvz_address"):
+            import asyncio
+            asyncio.ensure_future(_fetch_pvz_address())
         return _token_cache["x_token"]
 
     # Пробуем обновить через refresh_token

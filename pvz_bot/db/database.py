@@ -69,6 +69,18 @@ async def init_db():
                 UNIQUE(pvz_name, month, year)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS location_expenses (
+                location_id INTEGER PRIMARY KEY REFERENCES locations(id) ON DELETE CASCADE,
+                rent        REAL DEFAULT 0,
+                salary      REAL DEFAULT 0,
+                utilities   REAL DEFAULT 0,
+                internet    REAL DEFAULT 0,
+                cleaning    REAL DEFAULT 0,
+                other       REAL DEFAULT 0,
+                updated_at  TEXT DEFAULT (datetime('now'))
+            )
+        """)
         await db.execute("PRAGMA foreign_keys = ON")
         await db.commit()
 
@@ -86,6 +98,39 @@ async def get_all_locations() -> list:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id, name FROM locations ORDER BY id") as cursor:
             return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_location_expenses(location_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT rent, salary, utilities, internet, cleaning, other, updated_at "
+            "FROM location_expenses WHERE location_id=?", (location_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            for key in ("rent", "salary", "utilities", "internet", "cleaning", "other"):
+                d[key] = float(d.get(key) or 0)
+            return d
+
+
+async def save_location_expenses(location_id: int, expenses: dict) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO location_expenses (location_id, rent, salary, utilities, internet, cleaning, other, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(location_id) DO UPDATE SET
+                rent=excluded.rent, salary=excluded.salary, utilities=excluded.utilities,
+                internet=excluded.internet, cleaning=excluded.cleaning, other=excluded.other,
+                updated_at=excluded.updated_at
+        """, (
+            location_id,
+            expenses.get("rent", 0), expenses.get("salary", 0), expenses.get("utilities", 0),
+            expenses.get("internet", 0), expenses.get("cleaning", 0), expenses.get("other", 0),
+        ))
+        await db.commit()
 
 
 async def get_location(location_id: int) -> Optional[dict]:

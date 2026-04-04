@@ -120,18 +120,105 @@ async def verify_code(session_token: str, sms_code: str) -> dict:
         token_data["refresh_token"] = refresh_token
         token_data["refresh_exp"] = _jwt_exp(refresh_token) or int(time.time()) + 90 * 86400
 
+    # Если токен без привязки к ПВЗ (xpid=0) — пробуем апгрейд через refresh
+    if not pickpoint_id and refresh_token:
+        pvz_token = await _try_select_pvz(access_token, refresh_token)
+        if pvz_token:
+            _save_token(pvz_token)
+            return pvz_token
+
     _save_token(token_data)
     return token_data
 
 
+async def _try_select_pvz(general_token: str, refresh_token: str) -> Optional[dict]:
+    """
+    Когда validate возвращает общий токен (xpid=0), пробуем апгрейд:
+    POST /api/v1/refresh с x-pickpoint-external-id → PVZ-scoped токен.
+    xpid берём из конфига WB_PVZ_XPID или пробуем найти через API.
+    """
+    from config import WB_PVZ_XPID
+    xpid = WB_PVZ_XPID or await _discover_xpid(general_token)
+    if not xpid:
+        print("⚠️ WB: xpid не задан — токен без привязки к ПВЗ")
+        return None
+
+    headers = {
+        **MOBILE_HEADERS,
+        "x-token": general_token,
+        "x-pickpoint-external-id": str(xpid),
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            async with session.post(
+                "https://r-point.wb.ru/api/v1/refresh",
+                headers=headers,
+                json={"backoffice": False, "token": refresh_token},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    print(f"⚠️ WB PVZ-upgrade failed {resp.status}: {text[:200]}")
+                    return None
+                result = await resp.json()
+    except Exception as e:
+        print(f"⚠️ WB PVZ-upgrade error: {e}")
+        return None
+
+    new_access = (result.get("access") or {}).get("token")
+    new_refresh = (result.get("refresh") or {}).get("token")
+    if not new_access:
+        print(f"⚠️ WB PVZ-upgrade: токен не найден в ответе: {str(result)[:200]}")
+        return None
+
+    pvz_claims = _jwt_decode(new_access)
+    pvz_xpid = pvz_claims.get("xpid") or pvz_claims.get("pid") or xpid
+    print(f"✅ WB PVZ-upgrade: xpid={pvz_xpid}")
+    return {
+        "x_token": new_access,
+        "exp": _jwt_exp(new_access) or int(time.time()) + 86400,
+        "pickpoint_id": pvz_xpid,
+        "token_type": "mobile",
+        "refresh_token": new_refresh or refresh_token,
+        "refresh_exp": (_jwt_exp(new_refresh) if new_refresh else 0) or int(time.time()) + 90 * 86400,
+    }
+
+
+async def _discover_xpid(token: str) -> Optional[int]:
+    """Пробует найти xpid ПВЗ через WB API."""
+    probe_urls = [
+        "https://r-point.wb.ru/api/v1/pvz",
+        "https://r-point.wb.ru/api/v1/pvz/list",
+        "https://s-point.wb.ru/s3/api/v1/pvz/list",
+    ]
+    headers = {**MOBILE_HEADERS, "x-token": token}
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        for url in probe_urls:
+            try:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    # Ищем xpid / externalId в любом поле
+                    for item in (data if isinstance(data, list) else data.get("data", [data])):
+                        xpid = (item.get("xpid") or item.get("externalId")
+                                or item.get("pickpointId") or item.get("id"))
+                        if xpid:
+                            print(f"✅ WB xpid обнаружен через {url}: {xpid}")
+                            return int(xpid)
+            except Exception:
+                continue
+    return None
+
+
 def _save_token(data: dict):
-    # Не перезаписывать PVZ-токен (xpid != 0) общим токеном (xpid == 0)
+    # Не перезаписывать действующий PVZ-токен (xpid != 0) общим токеном (xpid == 0)
     if not data.get("pickpoint_id"):
         try:
             with open(TOKEN_FILE) as f:
                 existing = json.load(f)
-            if existing.get("pickpoint_id"):
-                return  # уже есть PVZ-токен — не трогаем
+            # Пропускаем только если старый токен ещё действует
+            if existing.get("pickpoint_id") and existing.get("exp", 0) > time.time():
+                return
         except Exception:
             pass
     os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)

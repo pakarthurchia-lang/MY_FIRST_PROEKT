@@ -9,6 +9,7 @@ OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "0"))
 OZON_PHONE = os.getenv("OZON_PHONE")
 OZON_EMAIL = os.getenv("OZON_EMAIL")
 WB_PHONE = os.getenv("WB_PHONE")
+WB_PVZ_XPID = int(os.getenv("WB_PVZ_XPID", "0"))  # xpid ПВЗ (из JWT x-pickpoint-external-id)
 OZON_STORE_UUID = os.getenv("OZON_STORE_UUID")  # UUID страницы магазина в turbo-pvz.ozon.ru
 OZON_URL = "https://turbo-pvz.ozon.ru"
 OZON_CLAIMS_URL = f"{OZON_URL}/claims/list"

@@ -83,6 +83,7 @@ def _cdp_get_network_logs(driver) -> list:
                     "headers": req.get("headers", {}),
                     "method": req.get("method", "GET"),
                     "requestId": params.get("requestId"),
+                    "postData": req.get("postData", ""),
                 })
             elif method == "Network.responseReceived":
                 params = msg.get("params", {})
@@ -110,6 +111,103 @@ def _cdp_get_response_body(driver, request_id: str) -> str:
         return body
     except Exception:
         return ""
+
+
+async def _validate_mobile(session_token: str, sms_code: str, status_fn=None) -> Optional[dict]:
+    """
+    Вызывает r-point.wb.ru/api/v1/validate из Python с мобильными заголовками.
+    session_token + sms_code берём из CDP postData браузера.
+    """
+    from wildberries.mobile_login import (
+        VALIDATE_URL, MOBILE_HEADERS, _jwt_decode as _mjwt, _jwt_exp,
+    )
+    import aiohttp as _aio
+    try:
+        async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=20)) as sess:
+            async with sess.post(
+                VALIDATE_URL,
+                headers=MOBILE_HEADERS,
+                json={"token": session_token, "code": sms_code.strip()},
+            ) as resp:
+                raw = await resp.text()
+                if status_fn:
+                    status_fn(f"mobile validate HTTP {resp.status}: {raw[:200]}")
+                if resp.status != 200:
+                    return None
+                result = json.loads(raw)
+        access_token = (
+            (result.get("access") or {}).get("token")
+            or result.get("token") or result.get("accessToken")
+        )
+        refresh_token = (
+            (result.get("refresh") or {}).get("token")
+            or result.get("refreshToken") or result.get("refresh_token")
+        )
+        if not access_token:
+            return None
+        claims = _mjwt(access_token)
+        return {
+            "x_token": access_token,
+            "exp": _jwt_exp(access_token) or int(time.time()) + 86400,
+            "pickpoint_id": claims.get("xpid") or claims.get("pid"),
+            "token_type": "mobile",
+            "refresh_token": refresh_token or "",
+            "refresh_exp": (_jwt_exp(refresh_token) if refresh_token else 0) or int(time.time()) + 90 * 86400,
+        }
+    except Exception as _e:
+        if status_fn:
+            status_fn(f"_validate_mobile exception: {_e}")
+        return None
+
+
+async def _select_pvz_mobile(general_token: str, refresh_tok: str, status_fn=None) -> Optional[dict]:
+    """
+    Апгрейд общего токена (xpid=0) до PVZ-scoped через POST /api/v1/refresh
+    с заголовком x-pickpoint-external-id. Аналог mobile_login._try_select_pvz.
+    """
+    from wildberries.mobile_login import MOBILE_HEADERS, _jwt_decode as _mjwt, _jwt_exp
+    from config import WB_PVZ_XPID
+    import aiohttp as _aio
+    xpid = WB_PVZ_XPID
+    if not xpid:
+        if status_fn:
+            status_fn("WB_PVZ_XPID не задан — пропускаю PVZ-upgrade")
+        return None
+    headers = {
+        **MOBILE_HEADERS,
+        "x-token": general_token,
+        "x-pickpoint-external-id": str(xpid),
+    }
+    try:
+        async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=20)) as sess:
+            async with sess.post(
+                "https://r-point.wb.ru/api/v1/refresh",
+                headers=headers,
+                json={"backoffice": False, "token": refresh_tok},
+            ) as resp:
+                raw = await resp.text()
+                if status_fn:
+                    status_fn(f"PVZ-upgrade HTTP {resp.status}: {raw[:200]}")
+                if resp.status != 200:
+                    return None
+                result = json.loads(raw)
+        new_access = (result.get("access") or {}).get("token")
+        new_refresh = (result.get("refresh") or {}).get("token")
+        if not new_access:
+            return None
+        claims = _mjwt(new_access)
+        return {
+            "x_token": new_access,
+            "exp": _jwt_exp(new_access) or int(time.time()) + 86400,
+            "pickpoint_id": claims.get("xpid") or claims.get("pid") or xpid,
+            "token_type": "mobile",
+            "refresh_token": new_refresh or refresh_tok,
+            "refresh_exp": (_jwt_exp(new_refresh) if new_refresh else 0) or int(time.time()) + 90 * 86400,
+        }
+    except Exception as _e:
+        if status_fn:
+            status_fn(f"_select_pvz_mobile exception: {_e}")
+        return None
 
 
 def _chrome_login_sync(
@@ -221,6 +319,17 @@ def _chrome_login_sync(
             };
             XMLHttpRequest.prototype.send = function(body) {
                 var self = this;
+                // Логируем тело запроса к r-point.wb.ru
+                if (self._wbUrl && self._wbUrl.includes('r-point.wb.ru')) {
+                    var reqStr = '';
+                    try { reqStr = typeof body === 'string' ? body.slice(0, 300) : (body ? JSON.stringify(body).slice(0, 300) : ''); } catch(e) {}
+                    var entry = {url: self._wbUrl, method: self._wbMethod, reqBody: reqStr, respBody: null, respStatus: null};
+                    window._wbCapture.validateReqs.push(entry);
+                    this.addEventListener('load', function() {
+                        entry.respBody = (self.responseText || '').slice(0, 800);
+                        entry.respStatus = self.status;
+                    });
+                }
                 this.addEventListener('load', function() {
                     try {
                         var d = JSON.parse(self.responseText || '');
@@ -512,31 +621,130 @@ def _chrome_login_sync(
                 token_url = captured.get("xTokenUrl", "unknown")
                 status(f"x-token перехвачен! URL источника: {token_url[-100:]}")
 
-                # Переходим на /payments, ждём полной загрузки
+                # Читаем CDP логи — извлекаем session_token + code, вызываем validate из Python
+                _py_validate_done = False
                 try:
-                    driver.get(f"{WB_PVZ_URL}/payments")
-                except Exception:
-                    pass
-                time.sleep(8)
+                    _early_logs = _cdp_get_network_logs(driver)
+                    _seen_pairs: set = set()
+                    for _r in _early_logs:
+                        if "r-point.wb.ru/api/v1/validate" not in _r.get("url", ""):
+                            continue
+                        _post = _r.get("postData", "")
+                        if not _post:
+                            continue
+                        try:
+                            _pd = json.loads(_post)
+                        except Exception:
+                            continue
+                        _sess_tok = _pd.get("token", "")
+                        _sms_code = _pd.get("code", "")
+                        if not _sess_tok or not _sms_code:
+                            continue
+                        _pair_key = (_sess_tok[:20], _sms_code)
+                        if _pair_key in _seen_pairs:
+                            continue
+                        _seen_pairs.add(_pair_key)
+                        status(f"Вызываю validate из Python: code={_sms_code}, token={_sess_tok[:30]}...")
+                        # Синхронный вызов в том же потоке (уже в thread executor)
+                        try:
+                            import asyncio as _aio
+                            _vres = _aio.run_coroutine_threadsafe(
+                                _validate_mobile(_sess_tok, _sms_code, status),
+                                loop
+                            ).result(timeout=30)
+                            if _vres and _vres.get("x_token"):
+                                _vc = _jwt_decode(_vres["x_token"])
+                                status(f"Python validate OK: pid={_vc.get('pid')}, xpid={_vc.get('xpid')}")
+                                if _vc.get("xpid") and int(_vc.get("xpid", 0)) != 0:
+                                    x_token = _vres["x_token"]
+                                    refresh_token = _vres.get("refresh_token", refresh_token)
+                                    _py_validate_done = True
+                                    break
+                        except Exception as _ve:
+                            status(f"Python validate error: {_ve}")
+                except Exception as _e:
+                    status(f"CDP early read error: {_e}")
 
-                # Кликаем на раздел "Выплаты" / "История" / "Вознаграждения"
-                clicked_section = driver.execute_script("""
-                    var kws = ['выплат', 'история', 'вознаграждени', 'начислени', 'отчёт', 'баланс'];
-                    var els = Array.from(document.querySelectorAll('a,button,[role="tab"],[role="menuitem"]'));
-                    for (var kw of kws) {
-                        for (var el of els) {
-                            var r = el.getBoundingClientRect();
-                            if (r.width > 0 && el.textContent.toLowerCase().includes(kw)) {
-                                el.click();
-                                return el.textContent.trim().slice(0, 40);
-                            }
-                        }
-                    }
-                    return null;
-                """)
-                if clicked_section:
-                    status(f"Кликнул раздел: '{clicked_section}'")
-                time.sleep(7)
+                # Пробуем прочитать refresh_token из IndexedDB (service worker хранит там)
+                if not refresh_token:
+                    try:
+                        _idb_refresh = driver.execute_script("""
+                            return new Promise((resolve) => {
+                                var result = null;
+                                try {
+                                    var req = indexedDB.open('wb-point-sw', undefined);
+                                    req.onsuccess = function(e) {
+                                        var db = e.target.result;
+                                        var names = Array.from(db.objectStoreNames);
+                                        if (!names.length) { resolve(null); return; }
+                                        var tx = db.transaction(names[0], 'readonly');
+                                        var store = tx.objectStore(names[0]);
+                                        var all = store.getAll();
+                                        all.onsuccess = function(e2) {
+                                            var items = e2.target.result || [];
+                                            for (var item of items) {
+                                                var v = JSON.stringify(item);
+                                                var m = v.match(/"(eyJ[A-Za-z0-9_\-]{50,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})"/g);
+                                                if (m && m.length > 1) { resolve(m[1].replace(/"/g,'')); return; }
+                                            }
+                                            resolve(null);
+                                        };
+                                        all.onerror = function() { resolve(null); };
+                                    };
+                                    req.onerror = function() { resolve(null); };
+                                } catch(e) { resolve(null); }
+                            });
+                        """)
+                        if _idb_refresh and len(_idb_refresh) > 50:
+                            status(f"IndexedDB refresh_token: {_idb_refresh[:40]}...")
+                            refresh_token = _idb_refresh
+                    except Exception as _ie:
+                        status(f"IndexedDB read error: {_ie}")
+
+                # Если есть общий токен + refresh — обновляем до PVZ-scoped через /api/v1/refresh
+                _cur_claims = _jwt_decode(x_token)
+                if refresh_token and (not _cur_claims.get("xpid") or int(_cur_claims.get("xpid", 0)) == 0):
+                    status(f"Пробую PVZ-upgrade через refresh_token...")
+                    try:
+                        import asyncio as _aio
+                        _pvz_res = _aio.run_coroutine_threadsafe(
+                            _select_pvz_mobile(x_token, refresh_token, status),
+                            loop
+                        ).result(timeout=30)
+                        if _pvz_res and _pvz_res.get("x_token"):
+                            _pc = _jwt_decode(_pvz_res["x_token"])
+                            status(f"PVZ-upgrade OK: pid={_pc.get('pid')}, xpid={_pc.get('xpid')}")
+                            x_token = _pvz_res["x_token"]
+                            refresh_token = _pvz_res.get("refresh_token", refresh_token)
+                    except Exception as _pe:
+                        status(f"PVZ-upgrade error: {_pe}")
+
+                # Пробуем несколько страниц подряд — ищем PVZ-scoped токен
+                # /payments даёт 403 для некоторых аккаунтов, пробуем другие
+                _pvz_pages = ["/", "/supply", "/analytics", "/employees", "/payments"]
+                for _page in _pvz_pages:
+                    _cur_claims = _jwt_decode(x_token)
+                    if _cur_claims.get("xpid") and int(_cur_claims.get("xpid", 0)) != 0:
+                        status(f"PVZ-токен уже есть (xpid={_cur_claims['xpid']}), пропускаю навигацию")
+                        break
+                    try:
+                        driver.get(f"{WB_PVZ_URL}{_page}")
+                    except Exception:
+                        pass
+                    time.sleep(8)
+                    # Ждём PVZ-scoped токен до 10 секунд
+                    for _w in range(10):
+                        time.sleep(1)
+                        _cap_check = driver.execute_script("return window._wbCapture || null;")
+                        if _cap_check and _cap_check.get("xToken"):
+                            _claims_check = _jwt_decode(_cap_check["xToken"])
+                            if _claims_check.get("xpid") and int(_claims_check.get("xpid", 0)) != 0:
+                                x_token = _cap_check["xToken"]
+                                refresh_token = _cap_check.get("refreshToken", refresh_token)
+                                status(f"PVZ-токен появился на {_page} (xpid={_claims_check['xpid']})")
+                                break
+                    else:
+                        status(f"Страница {_page}: PVZ-токен не появился")
 
                 # Логируем CDP запросы на странице payments (ВСЕ не-статические)
                 _log_cdp_interesting(driver, status, label="payments")
@@ -572,13 +780,20 @@ def _chrome_login_sync(
                 xpid_val = claims.get("xpid", "?")
                 status(f"JWT claims: pid={pid_val}, xpid={xpid_val}")
 
-                # Пробуем обменять general token на PVZ-scoped через validate
-                # Передаём driver чтобы использовать браузерные куки (именно их использует pvz-lk.wb.ru)
-                pvz_token = _try_validate_exchange(x_token, driver, status)
-                if pvz_token and pvz_token.get("x_token"):
-                    x_token = pvz_token["x_token"]
-                    refresh_token = pvz_token.get("refresh_token", refresh_token)
-                    status(f"PVZ-токен получен! pid={pvz_token.get('pid')}, xpid={pvz_token.get('xpid')}")
+                # Пробуем получить PVZ-scoped токен через browser-context validate
+                # (браузер вызывает r-point.wb.ru/api/v1/validate с куками — мы делаем то же самое)
+                pvz_token = _try_browser_validate(driver, x_token, status)
+                if pvz_token and pvz_token.get("x_token") and pvz_token.get("pickpoint_id"):
+                    # Сохраняем PVZ-токен напрямую (token_type=mobile → HEADERS_BASE не используется)
+                    _save_token(driver, pvz_token)
+                    return pvz_token
+
+                # Fallback: Python-side validate с куками из браузера
+                fallback = _try_validate_exchange(x_token, driver, status)
+                if fallback and fallback.get("x_token"):
+                    x_token = fallback["x_token"]
+                    refresh_token = fallback.get("refresh_token", refresh_token)
+                    status(f"PVZ-токен (fallback): pid={fallback.get('pid')}, xpid={fallback.get('xpid')}")
 
                 token_data = _build_token_data(x_token, refresh_token)
                 _save_token(driver, token_data)
@@ -661,15 +876,17 @@ def _log_cdp_interesting(driver, status_fn, label: str = ""):
             tok = h_lower.get("x-token", "")[:20] if has_token else ""
             all_api.append(f"  [{r.get('method','GET')}] {url[-100:]} tok={tok}")
             if "r-point.wb.ru" in url and r.get("method") in ("POST", "GET") and r.get("requestId"):
-                rpoint_req_ids.append((r["requestId"], r.get("method", ""), url))
+                rpoint_req_ids.append((r["requestId"], r.get("method", ""), url, r.get("postData", "")))
 
         if all_api:
             status_fn(f"CDP [{label}] {len(all_api)} запросов:\n" + "\n".join(all_api[:20]))
         else:
             status_fn(f"CDP [{label}] нет запросов (кроме статики)")
 
-        # Читаем тела ответов r-point.wb.ru
-        for req_id, method, url in rpoint_req_ids[:4]:
+        # Читаем тела запросов и ответов r-point.wb.ru
+        for req_id, method, url, post_data in rpoint_req_ids[:4]:
+            if post_data:
+                status_fn(f"r-point [{method}] req body: {post_data[:300]}")
             body = _cdp_get_response_body(driver, req_id)
             if body:
                 status_fn(f"r-point [{method}] resp: {body[:500]}")
@@ -677,7 +894,94 @@ def _log_cdp_interesting(driver, status_fn, label: str = ""):
         status_fn(f"CDP лог ошибка: {e}")
 
 
-def _try_validate_exchange(x_token: str, driver, status_fn) -> dict | None:
+def _try_browser_validate(driver, current_token: str, status_fn) -> Optional[dict]:
+    """
+    Вызывает r-point.wb.ru/api/v1/validate из браузерного JS-контекста (fire-and-forget).
+    Браузер автоматически добавляет сессионные куки.
+    Также читает validateReqs из XHR-перехватчика — там есть РЕАЛЬНЫЙ ответ браузера.
+    """
+    status_fn("browser-validate: читаю validateReqs из XHR-перехватчика...")
+    try:
+        # Сначала читаем что браузер УЖЕ получил от r-point.wb.ru/validate (из XHR-перехватчика)
+        captured = driver.execute_script("return window._wbCapture || null;")
+        if captured:
+            for vr in captured.get("validateReqs", []):
+                url = vr.get("url", "")
+                resp_body = vr.get("respBody", "") or ""
+                resp_status = vr.get("respStatus")
+                req_body = vr.get("reqBody", "") or ""
+                status_fn(f"XHR r-point [{vr.get('method')}] {url[-60:]}\n"
+                          f"  REQ: {req_body[:200]}\n"
+                          f"  RESP {resp_status}: {resp_body[:400]}")
+                if resp_status == 200 and resp_body:
+                    try:
+                        d = json.loads(resp_body)
+                        at = (d.get("access") or {}).get("token") or d.get("token") or d.get("accessToken")
+                        rt = (d.get("refresh") or {}).get("token") or d.get("refreshToken")
+                        if at and at.startswith("eyJ"):
+                            claims = _jwt_decode(at)
+                            xpid = claims.get("xpid") or claims.get("pid")
+                            status_fn(f"XHR validate → xpid={xpid}")
+                            if xpid:
+                                return {
+                                    "x_token": at,
+                                    "exp": _jwt_exp(at) or int(time.time()) + 86400,
+                                    "pickpoint_id": xpid,
+                                    "token_type": "mobile",
+                                    "refresh_token": rt or "",
+                                    "refresh_exp": (_jwt_exp(rt) if rt else 0) or int(time.time()) + 90 * 86400,
+                                }
+                    except Exception:
+                        pass
+
+        # Собственный fetch из браузерного контекста (fire-and-forget)
+        status_fn("browser-validate: запускаю собственный fetch к validate...")
+        driver.execute_script("""
+            window._wbOwnVal = null;
+            fetch('https://r-point.wb.ru/api/v1/validate', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {'Content-Type': 'application/json'},
+                body: '{}'
+            }).then(function(r) {
+                return r.text().then(function(t) {
+                    window._wbOwnVal = {status: r.status, body: t.slice(0, 1000)};
+                });
+            }).catch(function(e) {
+                window._wbOwnVal = {error: String(e)};
+            });
+        """)
+        time.sleep(4)
+        own_result = driver.execute_script("return window._wbOwnVal;")
+        if own_result:
+            status_fn(f"own fetch validate: status={own_result.get('status')}, resp={own_result.get('body', own_result.get('error', ''))[:300]}")
+            if own_result.get("status") == 200:
+                try:
+                    d = json.loads(own_result["body"])
+                    at = (d.get("access") or {}).get("token") or d.get("token") or d.get("accessToken")
+                    rt = (d.get("refresh") or {}).get("token") or d.get("refreshToken")
+                    if at and at.startswith("eyJ"):
+                        claims = _jwt_decode(at)
+                        xpid = claims.get("xpid") or claims.get("pid")
+                        if xpid:
+                            return {
+                                "x_token": at,
+                                "exp": _jwt_exp(at) or int(time.time()) + 86400,
+                                "pickpoint_id": xpid,
+                                "token_type": "mobile",
+                                "refresh_token": rt or "",
+                                "refresh_exp": (_jwt_exp(rt) if rt else 0) or int(time.time()) + 90 * 86400,
+                            }
+                except Exception:
+                    pass
+        else:
+            status_fn("own fetch validate: нет ответа (null)")
+    except Exception as e:
+        status_fn(f"browser-validate error: {e}")
+    return None
+
+
+def _try_validate_exchange(x_token: str, driver, status_fn) -> Optional[dict]:
     """
     Пробует обменять general web token на PVZ-scoped через r-point.wb.ru/api/v1/validate.
     pvz-lk.wb.ru вызывает этот endpoint БЕЗ x-token — только с браузерными куками.
@@ -910,11 +1214,15 @@ def _build_token_data(x_token: str, refresh_token: str) -> dict:
     # xpid = external pickpoint id (например 50016046)
     pickpoint_id = claims.get("xpid") or claims.get("pid") or None
 
+    # PVZ-scoped токен (xpid != 0) требует mobile-заголовки для point-balance.wb.ru
+    # Общий web-токен (xpid=0) использует web-заголовки
+    token_type = "mobile" if pickpoint_id else "web"
+
     data = {
         "x_token": x_token,
         "exp": exp,
         "pickpoint_id": pickpoint_id,
-        "token_type": "web",
+        "token_type": token_type,
     }
     if refresh_token:
         data["refresh_token"] = refresh_token
@@ -930,7 +1238,11 @@ def _save_token(driver, token_data: dict):
         try:
             with open(TOKEN_FILE) as f:
                 existing = json.load(f)
-            token_data["pickpoint_id"] = existing.get("pickpoint_id")
+            pid = existing.get("pickpoint_id")
+            if pid:
+                token_data["pickpoint_id"] = pid
+                # point-balance.wb.ru требует mobile-заголовки даже с web-токеном
+                token_data["token_type"] = "mobile"
         except Exception:
             pass
 

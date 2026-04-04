@@ -69,6 +69,11 @@ async def main():
     scheduler = setup_scheduler(bot)
     scheduler.start()
 
+    # Обновляем реестр ПВЗ в фоне при старте
+    import asyncio
+    from pvz_registry import refresh_all
+    asyncio.ensure_future(refresh_all())
+
     try:
         await bot.send_message(
             OWNER_CHAT_ID,

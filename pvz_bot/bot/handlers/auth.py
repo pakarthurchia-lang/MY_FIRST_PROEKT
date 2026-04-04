@@ -190,6 +190,27 @@ def _get_pending_code_sync(timeout: float = 300) -> str:
         _code_future = None
 
 
+# Отдельный механизм для WB (чтобы не конфликтовать с Ozon)
+_wb_code_future: "_cf.Future | None" = None
+
+
+def _set_wb_pending_code(code: str):
+    global _wb_code_future
+    if _wb_code_future is not None and not _wb_code_future.done():
+        _wb_code_future.set_result(code)
+
+
+def _get_wb_pending_code_sync(timeout: float = 300) -> str:
+    global _wb_code_future
+    _wb_code_future = _cf.Future()
+    try:
+        return _wb_code_future.result(timeout=timeout)
+    except Exception:
+        return ""
+    finally:
+        _wb_code_future = None
+
+
 def _jwt_decode_claims(token: str) -> dict:
     try:
         payload = token.split(".")[1]
@@ -318,67 +339,48 @@ async def handle_wb_phone(message: Message, state: FSMContext):
 
 
 async def _start_wb_web_login(message: Message, state: FSMContext, phone: str):
-    """Шаг 1: отправляем SMS через WB Point mobile API."""
-    from wildberries.mobile_login import send_sms, _normalize_phone
+    """Логин в WB ПВЗ кабинет через Chrome headless (pvz-lk.wb.ru)."""
+    from wildberries.mobile_login import _normalize_phone
     phone_norm = _normalize_phone(phone)
 
     await message.answer(
-        f"⏳ Отправляю SMS на <b>+{phone_norm}</b>...",
+        f"⏳ Открываю WB ПВЗ кабинет для <b>+{phone_norm}</b>...\n(Chrome headless)",
         parse_mode="HTML",
     )
 
     try:
-        session_token = await send_sms(phone_norm)
-    except RuntimeError as e:
+        from wildberries.web_login import login_wb_web
+        import wildberries.web_login as _wb_web
+    except ImportError as e:
         await state.clear()
         await message.answer(
-            f"❌ <b>Ошибка отправки SMS:</b>\n\n<code>{html.escape(str(e))}</code>",
-            parse_mode="HTML",
-        )
-        return
-    except Exception as e:
-        await state.clear()
-        await message.answer(
-            f"❌ <b>Неожиданная ошибка:</b>\n\n<code>{html.escape(f'{type(e).__name__}: {e}')}</code>",
+            f"❌ <b>Chrome не настроен:</b>\n<code>{e}</code>\n\n"
+            f"Установи: pip install undetected-chromedriver",
             parse_mode="HTML",
         )
         return
 
-    # Сохраняем session_token в FSM state
-    await state.update_data(wb_session_token=session_token)
     await state.set_state(WbLoginState.waiting_code)
+    _wb_web._get_pending_code_sync_override = _get_wb_pending_code_sync
 
-    await message.answer(
-        "📨 <b>SMS отправлена!</b>\n\nВведи код из SMS:",
-        parse_mode="HTML",
-    )
+    async def get_code():
+        await message.answer(
+            "📨 <b>WB отправил SMS</b>\n\nВведи код из SMS:",
+            parse_mode="HTML",
+        )
 
+    async def on_status(msg: str):
+        try:
+            await message.answer(f"🔄 {msg}")
+        except Exception:
+            pass
 
-@router.message(WbLoginState.waiting_code)
-async def handle_wb_code(message: Message, state: FSMContext):
-    if message.from_user.id != OWNER_CHAT_ID:
-        return
-    if not message.text:
-        return
-
-    code = message.text.strip()
-    data = await state.get_data()
-    session_token = data.get("wb_session_token")
-
-    if not session_token:
-        await state.clear()
-        await message.answer("❌ Сессия устарела. Попробуй /wb_login снова.")
-        return
-
-    await message.answer("⏳ Проверяю код...")
-
-    from wildberries.mobile_login import verify_code
     try:
-        token_data = await verify_code(session_token, code)
+        token_data = await login_wb_web(phone=phone_norm, get_code=get_code, on_status=on_status)
     except RuntimeError as e:
         await state.clear()
         await message.answer(
-            f"❌ <b>Ошибка верификации:</b>\n\n<code>{html.escape(str(e))}</code>\n\n"
+            f"❌ <b>Ошибка логина WB:</b>\n\n<code>{html.escape(str(e))}</code>\n\n"
             f"Попробуй /wb_login снова.",
             parse_mode="HTML",
         )
@@ -401,16 +403,29 @@ async def handle_wb_code(message: Message, state: FSMContext):
     remaining_h = max(0, int((exp - _time.time()) / 3600))
     has_refresh = bool(token_data.get("refresh_token"))
     pid = token_data.get("pickpoint_id")
-    claims_pid = _jwt_decode_claims(token_data.get("x_token", ""))
+    ttype = token_data.get("token_type", "web")
+    pvz_line = f"ПВЗ ID: <b>{pid}</b> ✅" if pid else "⚠️ ПВЗ ID не определён"
+    type_line = f"Тип токена: <b>{'Mobile PVZ' if ttype == 'mobile' else 'Web'}</b> (pvz-lk.wb.ru)"
 
     await message.answer(
         f"✅ <b>WB авторизация успешна!</b>\n\n"
-        f"ПВЗ ID: <b>{pid}</b>\n"
-        f"pid={claims_pid.get('pid')}, xpid={claims_pid.get('xpid')}\n"
+        f"{pvz_line}\n"
+        f"{type_line}\n"
         f"Токен действует: <b>~{remaining_h}ч</b>\n"
-        f"{'♻️ Refresh token получен (90 дней)!' if has_refresh else '⚠️ Refresh token не получен'}",
+        f"{'♻️ Refresh token получен!' if has_refresh else '⚠️ Refresh token не получен'}",
         parse_mode="HTML",
     )
+
+
+@router.message(WbLoginState.waiting_code)
+async def handle_wb_code(message: Message, state: FSMContext):
+    """Передаёт SMS код в ожидающий Chrome поток."""
+    if message.from_user.id != OWNER_CHAT_ID:
+        return
+    if not message.text:
+        return
+    _set_wb_pending_code(message.text.strip())
+    await message.answer("⏳ Ввожу код...")
 
 
 # ── /wb_debug — диагностика validate endpoint ────────────────────────────────

@@ -214,8 +214,8 @@ def _chrome_login_sync(
 
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
-    # eager = ждём только DOM, не все ресурсы → не зависнет на медленных шрифтах/картинках
-    options.page_load_strategy = "eager"
+    # normal = ждём полной загрузки страницы включая JS — нужно для Nuxt SPA
+    options.page_load_strategy = "normal"
 
     driver = None
     try:
@@ -273,35 +273,42 @@ def _chrome_login_sync(
         # ВАЖНО: приложение само генерирует state/nonce и сохраняет в sessionStorage.
         # Если идти напрямую на id.ozon.ru — state не совпадёт при callback → обмен токена не работает.
         status("Открываю turbo-pvz.ozon.ru/login...")
-        try:
-            driver.get("https://turbo-pvz.ozon.ru/login")
-        except Exception:
-            pass  # eager: TimeoutException нормален — DOM уже есть
-        time.sleep(4)
+        driver.get("https://turbo-pvz.ozon.ru/login")
+        time.sleep(2)
 
         # Нажимаем кнопку "Войти через Ozon ID" — приложение само делает redirect на id.ozon.ru
         status("Нажимаю 'Войти через Ozon ID'...")
+        # Сначала логируем все кнопки для диагностики
+        all_btns = driver.execute_script("""
+            return Array.from(document.querySelectorAll('button,a')).map(function(b) {
+                var r = b.getBoundingClientRect();
+                return {tag: b.tagName, text: (b.innerText||b.textContent||'').trim().slice(0,60), w: Math.round(r.width), h: Math.round(r.height)};
+            }).filter(function(b) { return b.w > 0 && b.h > 0; });
+        """)
+        status(f"Кнопки на странице: {all_btns[:5]}")
         clicked = driver.execute_script("""
-            var texts = ['ozon id', 'ozonid', 'войти через'];
+            var texts = ['ozon id', 'ozonid', 'войти через', 'войти', 'вход'];
             var els = Array.from(document.querySelectorAll('button, a'));
             for (var t of texts) {
                 for (var el of els) {
-                    if (el.textContent.toLowerCase().includes(t)) {
+                    var txt = (el.innerText || el.textContent || '').toLowerCase();
+                    var r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && txt.includes(t)) {
                         el.click();
-                        return el.textContent.trim().slice(0, 50);
+                        return (el.innerText || el.textContent || '').trim().slice(0, 50);
                     }
                 }
             }
             return null;
         """)
         if not clicked:
-            # Fallback: первая видимая кнопка
+            # Fallback: первая видимая кнопка (не ссылка)
             clicked = driver.execute_script("""
                 var btns = Array.from(document.querySelectorAll('button'));
                 var vis = btns.filter(function(b) {
                     var r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0;
                 });
-                if (vis.length > 0) { vis[0].click(); return vis[0].textContent.trim().slice(0, 50); }
+                if (vis.length > 0) { vis[0].click(); return (vis[0].innerText||vis[0].textContent||'').trim().slice(0, 50) || 'btn[0]'; }
                 return null;
             """)
         status(f"Нажата кнопка: '{clicked}' — жду перехода на id.ozon.ru...")
@@ -352,6 +359,29 @@ def _chrome_login_sync(
         cur_url = driver.current_url
         status(f"На странице входа: {cur_url[:80]}")
 
+        # Если всё ещё на /login — SSO куки устарели, чистим их и нажимаем кнопку снова
+        if "turbo-pvz.ozon.ru" in cur_url and "/login" in cur_url:
+            status("SSO куки не сработали — удаляю куки и перезапускаю логин...")
+            driver.delete_all_cookies()
+            time.sleep(1)
+            driver.get("https://turbo-pvz.ozon.ru/login")
+            time.sleep(2)
+            # Нажимаем кнопку Ozon ID снова
+            driver.execute_script("""
+                var kws = ['ozon id', 'войти', 'войти через'];
+                var btns = Array.from(document.querySelectorAll('button,a'));
+                for (var kw of kws) {
+                    for (var b of btns) {
+                        if (b.textContent.toLowerCase().includes(kw) && b.getBoundingClientRect().width > 0) {
+                            b.click(); return;
+                        }
+                    }
+                }
+            """)
+            time.sleep(5)
+            cur_url = driver.current_url
+            status(f"После повторного нажатия: {cur_url[:80]}")
+
         # Получаем email
         email = phone if "@" in phone else ""
         if not email:
@@ -377,37 +407,50 @@ def _chrome_login_sync(
                 )
             )
             ActionChains(driver).move_to_element(email_btn).click().perform()
-            time.sleep(2)
-            status("Форма email открыта")
         except Exception:
             status("Кнопка 'по почте' не найдена — пробую JS поиск...")
-            clicked = driver.execute_script("""
+            driver.execute_script("""
                 var texts = ['sign in by email', 'войти по почте', 'по почте', 'e-mail', 'email'];
                 var els = Array.from(document.querySelectorAll('button, a, span'));
                 for (var t of texts) {
                     for (var el of els) {
                         if (el.textContent.toLowerCase().includes(t)) {
                             var r = el.getBoundingClientRect();
-                            if (r.width > 0 && r.height > 0) { el.click(); return el.textContent.trim().slice(0,50); }
+                            if (r.width > 0 && r.height > 0) { el.click(); return; }
                         }
                     }
                 }
-                return null;
             """)
-            if clicked:
-                status(f"JS клик по '{clicked}'")
-                time.sleep(2)
 
-        # Ждём email инпут (не tel, не filter)
+        # Ждём появления input[type='email'] — признак того что форма переключилась
         status("Жду email инпут...")
         try:
             WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "input[type='email'], input[type='text']:not([name='filter']):not([name='autocomplete'])")
-                )
+                EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']"))
             )
+            status("Форма email открыта")
         except Exception:
-            pass
+            # Форма не переключилась — пробуем кликнуть ещё раз через JS
+            status("Email форма не появилась, повторный клик...")
+            driver.execute_script("""
+                var texts = ['sign in by email', 'войти по почте', 'по почте', 'email'];
+                var els = Array.from(document.querySelectorAll('button, a, span'));
+                for (var t of texts) {
+                    for (var el of els) {
+                        if (el.textContent.toLowerCase().includes(t)) {
+                            var r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) { el.click(); return; }
+                        }
+                    }
+                }
+            """)
+            try:
+                WebDriverWait(driver, 8).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']"))
+                )
+                status("Форма email открыта (2я попытка)")
+            except Exception:
+                status("Email форма так и не появилась — продолжаю с текущей формой")
         time.sleep(1)
 
         # Диагностика
@@ -415,18 +458,21 @@ def _chrome_login_sync(
         inp_dump = [{"type": i.get_attribute("type"), "name": i.get_attribute("name"), "displayed": i.is_displayed()} for i in all_inp]
         status(f"Inputs: {inp_dump}")
 
-        # Вводим email через JS — только в email/text инпут, НЕ в tel/filter
+        # Вводим email через JS — только в email инпут (не tel, не filter)
         status(f"Ввожу email: {email[:15]}...")
         typed = driver.execute_script("""
             function findEmailInput(root) {
-                var selectors = ['input[type="email"]',
-                    'input[type="text"]:not([name="filter"]):not([name="autocomplete"])'];
-                for (var sel of selectors) {
-                    var inputs = root.querySelectorAll(sel);
-                    for (var inp of inputs) {
-                        var rect = inp.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) return inp;
-                    }
+                // Сначала ищем строго email
+                var inputs = root.querySelectorAll('input[type="email"], input[name="email"]');
+                for (var inp of inputs) {
+                    var rect = inp.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) return inp;
+                }
+                // Fallback — любой видимый не-скрытый и не-фильтр инпут
+                var fallback = root.querySelectorAll('input:not([type="hidden"]):not([name="filter"]):not([type="tel"])');
+                for (var inp of fallback) {
+                    var rect = inp.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) return inp;
                 }
                 var all = root.querySelectorAll('*');
                 for (var el of all) {
@@ -500,7 +546,7 @@ def _chrome_login_sync(
         # Step 5: Получаем код от пользователя
         asyncio.run_coroutine_threadsafe(get_code(), loop)
         from bot.handlers.auth import _get_pending_code_sync
-        code = _get_pending_code_sync(timeout=300)
+        code = _get_pending_code_sync(timeout=600)
 
         if not code or not code.strip():
             raise RuntimeError("Код не получен (таймаут 5 мин)")
@@ -665,6 +711,67 @@ def _chrome_login_sync(
                 _sso_seconds += 1
                 if _sso_seconds % 10 == 0:
                     status(f"На sso.ozon.ru уже {_sso_seconds}с — ожидаю редиректа...")
+
+                # sso.ozon.ru/otp — страница OTP после email-кода (проверка нового устройства)
+                if "/otp" in current_url and not _sms_handled:
+                    _sms_handled = True
+                    time.sleep(2)
+                    status("SSO OTP страница — запрашиваю SMS код...")
+                    # Ищем кнопку отправки SMS / подтверждения
+                    driver.execute_script("""
+                        var kws = ['sms', 'смс', 'отправить', 'получить код', 'подтвердить', 'confirm', 'send'];
+                        var btns = Array.from(document.querySelectorAll('button,a'));
+                        for (var kw of kws) {
+                            for (var b of btns) {
+                                if (b.textContent.toLowerCase().includes(kw) && b.getBoundingClientRect().width > 0) {
+                                    b.click(); return kw;
+                                }
+                            }
+                        }
+                        return null;
+                    """)
+                    time.sleep(2)
+                    # Уведомляем пользователя через get_code callback
+                    asyncio.run_coroutine_threadsafe(
+                        on_status("Ozon требует дополнительное подтверждение (SSO OTP)\n📨 Введи SMS-код:"),
+                        loop
+                    )
+                    asyncio.run_coroutine_threadsafe(get_code(), loop)
+                    from bot.handlers.auth import _get_pending_code_sync
+                    sms_code = _get_pending_code_sync(timeout=180)
+                    if sms_code:
+                        # Вводим код в инпуты на странице
+                        inputs = driver.find_elements(By.CSS_SELECTOR, "input")
+                        for inp in inputs:
+                            try:
+                                if inp.is_displayed():
+                                    inp.clear()
+                                    inp.send_keys(sms_code)
+                                    break
+                            except Exception:
+                                pass
+                        time.sleep(0.5)
+                        from selenium.webdriver.common.action_chains import ActionChains as _AC
+                        _AC(driver).send_keys(Keys.RETURN).perform()
+                        time.sleep(0.5)
+                        # Также кликаем кнопку подтверждения если есть
+                        driver.execute_script("""
+                            var btns = Array.from(document.querySelectorAll('button'));
+                            var skip = ['скрыть', 'закрыть', 'отмена', 'cancel', 'назад'];
+                            var kws = ['подтвердить', 'войти', 'confirm', 'verify', 'продолжить', 'continue'];
+                            for (var kw of kws) {
+                                for (var b of btns) {
+                                    var txt = b.textContent.toLowerCase();
+                                    var r = b.getBoundingClientRect();
+                                    if (r.width > 0 && txt.includes(kw) && !skip.some(s => txt.includes(s))) {
+                                        b.click(); return;
+                                    }
+                                }
+                            }
+                            var sub = btns.find(b => b.type==='submit' && b.getBoundingClientRect().width > 0);
+                            if (sub) sub.click();
+                        """)
+                        status("SSO OTP: код введён, жду редиректа...")
             else:
                 _sso_seconds = 0
 
@@ -676,39 +783,47 @@ def _chrome_login_sync(
                 # Ждём полной загрузки страницы
                 time.sleep(3)
 
-                # Кликаем кнопку через ActionChains + JS поиск (Shadow DOM)
+                # Логируем все кнопки на странице для диагностики
+                all_page_btns = driver.execute_script("""
+                    return Array.from(document.querySelectorAll('button')).map(function(b) {
+                        var r = b.getBoundingClientRect();
+                        return {text: (b.innerText||b.textContent||'').trim().slice(0,50), w: Math.round(r.width), h: Math.round(r.height)};
+                    });
+                """)
+                status(f"Кнопки на странице OTP: {all_page_btns}")
+
+                # Кликаем кнопку отправки SMS — явно исключаем "скрыть"
                 clicked = driver.execute_script("""
                     function findBtn(root) {
-                        var btns = root.querySelectorAll('button');
-                        // Ищем кнопку с нужным текстом
-                        var keywords = ['войти', 'подтвердить', 'получить', 'отправить', 'confirm'];
+                        var btns = Array.from(root.querySelectorAll('button'));
+                        var skip = ['скрыть', 'закрыть', 'отмена', 'cancel', 'back', 'назад'];
+                        var keywords = ['отправить sms', 'отправить смс', 'получить sms', 'получить смс',
+                                        'войти', 'подтвердить', 'получить код', 'отправить код', 'confirm', 'send', 'продолжить'];
+                        // Позитивный поиск
                         for (var kw of keywords) {
                             for (var b of btns) {
-                                if (b.textContent.toLowerCase().includes(kw)) {
-                                    var rect = b.getBoundingClientRect();
-                                    if (rect.width > 0) return b;
-                                }
+                                var txt = (b.innerText||b.textContent||'').toLowerCase();
+                                var r = b.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0 && txt.includes(kw)) return b;
                             }
                         }
-                        // Fallback: последняя видимая кнопка (обычно это CTA)
-                        var visible = Array.from(btns).filter(function(b) {
+                        // Fallback: последняя видимая кнопка, НЕ из списка skip
+                        var visible = btns.filter(function(b) {
                             var r = b.getBoundingClientRect();
-                            return r.width > 0 && r.height > 0;
+                            if (r.width <= 0 || r.height <= 0) return false;
+                            var txt = (b.innerText||b.textContent||'').toLowerCase();
+                            return !skip.some(function(s) { return txt.includes(s); });
                         });
                         return visible.length > 0 ? visible[visible.length - 1] : null;
                     }
                     var btn = findBtn(document);
                     if (!btn) {
-                        // Поиск в Shadow DOM
                         var all = document.querySelectorAll('*');
                         for (var el of all) {
-                            if (el.shadowRoot) {
-                                btn = findBtn(el.shadowRoot);
-                                if (btn) break;
-                            }
+                            if (el.shadowRoot) { btn = findBtn(el.shadowRoot); if (btn) break; }
                         }
                     }
-                    if (btn) { btn.click(); return btn.textContent.trim().slice(0,30); }
+                    if (btn) { btn.click(); return (btn.innerText||btn.textContent||'').trim().slice(0,40); }
                     return null;
                 """)
                 status(f"Кнопка нажата: '{clicked}' — ждём SMS...")
@@ -721,7 +836,7 @@ def _chrome_login_sync(
                         loop,
                     )
                 from bot.handlers.auth import _get_pending_code_sync
-                sms_code = _get_pending_code_sync(timeout=300)
+                sms_code = _get_pending_code_sync(timeout=600)
                 if not sms_code or not sms_code.strip():
                     raise RuntimeError("SMS код не получен (таймаут 5 мин)")
                 sms_code = sms_code.strip().replace(" ", "").replace("-", "").replace("O", "0")
@@ -763,22 +878,27 @@ def _chrome_login_sync(
                             actions.pause(0.08)
                         actions.perform()
                         time.sleep(0.5)
-                        # Кликаем кнопку подтверждения
+                        # Нажимаем Enter через ActionChains — самый надёжный способ
+                        ActionChains(driver).send_keys(Keys.RETURN).perform()
+                        time.sleep(0.5)
+                        # Также кликаем кнопку подтверждения если есть
                         driver.execute_script("""
-                            var btns = document.querySelectorAll('button');
+                            var btns = Array.from(document.querySelectorAll('button'));
+                            var skip = ['скрыть', 'закрыть', 'отмена', 'cancel', 'назад', 'back'];
                             var keywords = ['войти', 'подтвердить', 'продолжить', 'отправить',
                                             'confirm', 'continue', 'verify', 'submit', 'sign in'];
                             for (var kw of keywords) {
                                 for (var b of btns) {
-                                    if (b.textContent.toLowerCase().includes(kw)) {
-                                        var r = b.getBoundingClientRect();
-                                        if (r.width > 0) { b.click(); return; }
+                                    var txt = b.textContent.toLowerCase();
+                                    var r = b.getBoundingClientRect();
+                                    if (r.width > 0 && txt.includes(kw) && !skip.some(s => txt.includes(s))) {
+                                        b.click(); return kw;
                                     }
                                 }
                             }
-                            // Fallback: Enter на активном элементе
-                            document.activeElement && document.activeElement.dispatchEvent(
-                                new KeyboardEvent('keydown', {key:'Enter', keyCode:13, bubbles:true}));
+                            // Fallback: первая submit кнопка
+                            var sub = btns.find(b => b.type === 'submit' && b.getBoundingClientRect().width > 0);
+                            if (sub) { sub.click(); return 'submit'; }
                         """)
                         time.sleep(5)
                         # Проверяем переход

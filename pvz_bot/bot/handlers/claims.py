@@ -1,6 +1,6 @@
 from datetime import datetime
 from aiogram import Router, F
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from ozon.scraper import scrape_claims, get_monthly_stats
 from config import OWNER_CHAT_ID
 
@@ -40,6 +40,138 @@ def format_claim(claim: dict) -> str:
         f"   Срок: {deadline}"
     )
 
+
+
+@router.callback_query(F.data.startswith("claim_detail:"))
+async def cb_claim_detail(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    claim_id = parts[1]
+    store_id = parts[2]
+    request_type = parts[3] if len(parts) > 3 else "Claim"
+
+    await call.message.answer(f"🔄 Загружаю детали претензии №{claim_id}...")
+
+    try:
+        from ozon.claim_detail import get_claim_detail
+        detail = await get_claim_detail(claim_id, store_id, request_type)
+    except Exception as e:
+        await call.message.answer(f"❌ Не удалось загрузить детали: {e}")
+        return
+
+    msg = detail.get("message", "")
+    sidebar = ""
+    if detail.get("date_issued"):   sidebar += f"📅 Дата: {detail['date_issued']}\n"
+    if detail.get("reason"):        sidebar += f"⚡ Причина: {detail['reason']}\n"
+    if detail.get("amount"):        sidebar += f"💸 Сумма: {detail['amount']} руб.\n"
+    if detail.get("time_to_respond"): sidebar += f"⏰ Срок ответа: {detail['time_to_respond']}\n"
+    if detail.get("direction"):     sidebar += f"📦 Направление: {detail['direction']}\n"
+    if detail.get("shipping_number"): sidebar += f"🚚 Перевозка №{detail['shipping_number']}\n"
+    if detail.get("shipping_date"): sidebar += f"📆 Дата перевозки: {detail['shipping_date']}\n"
+
+    # Кратко суммируем сообщение от Ozon через Claude
+    summary = msg
+    if msg and len(msg) > 100:
+        try:
+            import os
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            res = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{"role": "user", "content": (
+                    f"Кратко опиши суть этого сообщения от Ozon в 1-2 предложениях. "
+                    f"Только суть — что произошло и что требуется. Не пересказывай полностью.\n\n{msg[:2000]}"
+                )}],
+            )
+            summary = res.content[0].text.strip()
+        except Exception:
+            summary = msg[:300] + ("..." if len(msg) > 300 else "")
+
+    text = (
+        f"📋 <b>Претензия №{claim_id}</b>\n\n"
+        f"{sidebar}\n"
+        f"💬 <b>Суть:</b>\n{summary}"
+    )
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🤖 Как обработать претензию",
+            callback_data=f"claim_advice:{claim_id}:{store_id}:{request_type}",
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="claims:ozon")],
+    ])
+    await call.message.answer(text[:4000], parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("claim_advice:"))
+async def cb_claim_advice(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+
+    parts = call.data.split(":")
+    claim_id = parts[1]
+    store_id = parts[2]
+    request_type = parts[3] if len(parts) > 3 else "Claim"
+
+    await call.message.answer(f"🤖 Анализирую претензию №{claim_id}...")
+
+    try:
+        from ozon.claim_detail import get_claim_detail
+        detail = await get_claim_detail(claim_id, store_id, request_type)
+    except Exception as e:
+        await call.message.answer(f"❌ Не удалось загрузить детали: {e}")
+        return
+
+    # Строим промпт для Claude
+    prompt = f"""Ты эксперт по работе с претензиями Ozon ПВЗ. Помоги обработать претензию.
+
+Претензия №{claim_id}
+Причина: {detail.get('reason', '—')}
+Сумма: {detail.get('amount', '—')} руб.
+Направление: {detail.get('direction', '—')}
+Срок ответа: {detail.get('time_to_respond', '—')}
+Номер перевозки: {detail.get('shipping_number', '—')}
+Дата перевозки: {detail.get('shipping_date', '—')}
+
+Текст от Ozon:
+{detail.get('message', '—')}
+
+Дай:
+1. Краткий анализ — в чём суть претензии и что от нас требуют
+2. Конкретные шаги что нужно сделать (проверить камеры, найти видео, написать ответ и т.д.)
+3. Готовый текст ответа Ozon (можно вставить в форму на сайте)
+4. Шансы на оспаривание (высокие/средние/низкие) и почему
+
+Отвечай на русском, конкретно и по делу. Не более 400 слов."""
+
+    try:
+        import os
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        message = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        advice = message.content[0].text
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка Claude: {e}")
+        return
+
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К претензии", callback_data=f"claim_detail:{claim_id}:{store_id}:{request_type}")],
+        [InlineKeyboardButton(text="📋 Все претензии", callback_data="claims:ozon")],
+    ])
+    await call.message.answer(
+        f"🤖 <b>Рекомендация по претензии №{claim_id}</b>\n\n{advice}",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
 
 
 @router.message(F.text == "/claims")

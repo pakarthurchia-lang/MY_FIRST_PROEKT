@@ -70,16 +70,35 @@ async def cb_claims(call: CallbackQuery):
     if call.from_user.id != OWNER_CHAT_ID:
         return
     await call.answer()
-    await call.message.answer("🔄 Получаю актуальные претензии...")
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔵 Ozon",           callback_data="claims:ozon")],
+        [InlineKeyboardButton(text="🟣 Wildberries",    callback_data="claims:wb")],
+        [InlineKeyboardButton(text="🟡 Яндекс Маркет",  callback_data="claims:ym")],
+        [InlineKeyboardButton(text="◀️ Назад",          callback_data="menu:back")],
+    ])
+    await call.message.answer(
+        "📋 <b>Претензии и штрафы</b>\n\nВыбери платформу:",
+        parse_mode="HTML", reply_markup=markup,
+    )
 
+
+@router.callback_query(F.data == "claims:ozon")
+async def cb_claims_ozon(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await call.message.answer("🔄 Получаю претензии Ozon...")
     try:
         claims = await scrape_claims()
     except Exception as e:
-        await call.message.answer(f"❌ Ошибка: {e}")
+        await call.message.answer(f"❌ Ошибка: {e}", reply_markup=main_menu())
         return
 
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К претензиям", callback_data="menu:claims")],
+    ])
     if not claims:
-        await call.message.answer("✅ Активных претензий нет!", reply_markup=main_menu())
+        await call.message.answer("✅ Активных претензий Ozon нет!", reply_markup=back_kb)
         return
 
     claims.sort(key=lambda c: c.get("deadline") or "9999")
@@ -89,7 +108,126 @@ async def cb_claims(call: CallbackQuery):
     for claim in claims:
         text += format_claim(claim) + "\n\n"
 
-    await call.message.answer(text, parse_mode="HTML", reply_markup=main_menu())
+    # Кнопки для каждой претензии
+    buttons = []
+    for claim in claims:
+        cb = f"claim_detail:{claim['id']}:{claim.get('store_id','')}:{claim.get('request_type','Claim')}"
+        buttons.append([InlineKeyboardButton(
+            text=f"🔍 №{claim['id']} — {claim['claim_type']} {claim['amount']:,.0f}₽",
+            callback_data=cb,
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ К претензиям", callback_data="menu:claims")])
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await call.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data == "claims:wb")
+async def cb_claims_wb(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await call.message.answer("🔄 Получаю удержания Wildberries...")
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К претензиям", callback_data="menu:claims")],
+    ])
+    try:
+        from wildberries.http_client import get_pickpoint_id
+        from wildberries.api import fetch_all_payments, aggregate_by_month
+        from datetime import date
+
+        pid = get_pickpoint_id()
+        if not pid:
+            await call.message.answer("❌ WB токен не найден. Войди через /wb_login.", reply_markup=back_kb)
+            return
+
+        payments = await fetch_all_payments(pid)
+        by_month = aggregate_by_month(payments)
+
+        # Последние 3 месяца с удержаниями
+        today = date.today()
+        rows = []
+        total_fines = 0.0
+        for (m, y), data in sorted(by_month.items(), key=lambda x: (x[0][1], x[0][0]), reverse=True)[:6]:
+            if data["fines"] > 0:
+                rows.append(
+                    f"📅 <b>{MONTHS_RU[m]} {y}</b>\n"
+                    f"   Удержания: <b>-{data['fines']:,.2f} руб.</b>\n"
+                    f"   Выдач: {data['orders']} | Вознаграждение: {data['revenue']:,.2f} руб."
+                )
+                total_fines += data["fines"]
+
+        if not rows:
+            await call.message.answer("✅ Удержаний WB за последние 6 месяцев нет!", reply_markup=back_kb)
+            return
+
+        text = (
+            f"🟣 <b>Удержания Wildberries</b>\n"
+            f"💸 Итого за период: <b>{total_fines:,.2f} руб.</b>\n\n"
+            + "\n\n".join(rows)
+        )
+        await call.message.answer(text, parse_mode="HTML", reply_markup=back_kb)
+
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка: {e}", reply_markup=back_kb)
+
+
+@router.callback_query(F.data == "claims:ym")
+async def cb_claims_ym(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await call.message.answer("🔄 Получаю штрафы Яндекс Маркет...")
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К претензиям", callback_data="menu:claims")],
+    ])
+    try:
+        from yandex.reports import download_report_xlsx, available_months_for_menu
+        from yandex.xlsx_parser import parse_ym_fines
+
+        months = available_months_for_menu(3)
+        if not months:
+            await call.message.answer("❌ Отчёты ЯМ не найдены.", reply_markup=back_kb)
+            return
+
+        all_rows = []
+        total_fines = 0.0
+        for m in months:
+            try:
+                xlsx = await download_report_xlsx(m["month"], m["year"])
+                fines = parse_ym_fines(xlsx, m["month"], m["year"])
+                if not fines:
+                    continue
+                period_total = sum(v["total"] for v in fines.values())
+                if period_total <= 0:
+                    continue
+                total_fines += period_total
+                block = f"📅 <b>{m['label']}</b> — {period_total:,.2f} руб.\n"
+                for pvz_name, data in fines.items():
+                    if data["total"] <= 0:
+                        continue
+                    block += f"   🏪 {pvz_name}: <b>{data['total']:,.2f} руб.</b>\n"
+                    for item in data.get("items", [])[:5]:
+                        block += f"      • {item.get('date', '')[:10]} {item.get('reason', '')}: -{item.get('amount', 0):,.2f} руб.\n"
+                all_rows.append(block)
+            except Exception:
+                continue
+
+        if not all_rows:
+            await call.message.answer("✅ Штрафов ЯМ за последние 3 месяца нет!", reply_markup=back_kb)
+            return
+
+        text = (
+            f"🟡 <b>Штрафы Яндекс Маркет</b>\n"
+            f"💸 Итого за период: <b>{total_fines:,.2f} руб.</b>\n\n"
+            + "\n".join(all_rows)
+        )
+        await call.message.answer(text, parse_mode="HTML", reply_markup=back_kb)
+
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка: {e}", reply_markup=back_kb)
 
 
 # ── Прибыль — выбор платформы ──────────────────────────────────────────────
@@ -216,7 +354,7 @@ async def cb_profit_platform(call: CallbackQuery):
 
 # ── Прибыль — результат ────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("profit:"))
+@router.callback_query(F.data.regexp(r"^profit:\d+:\d+$"))
 async def cb_profit_result(call: CallbackQuery):
     if call.from_user.id != OWNER_CHAT_ID:
         return

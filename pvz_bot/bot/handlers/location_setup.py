@@ -32,56 +32,28 @@ class LocationSetupState(StatesGroup):
 async def _load_all_pvzs() -> Tuple[List[dict], Optional[str]]:
     """
     Возвращает (pvzs, warning).
-    pvzs — список {platform, pvz_id, pvz_name}
-    warning — строка предупреждения если ЯМ недоступен, иначе None
+    Сначала читает реестр, затем фоново обновляет его с платформ.
     """
+    from pvz_registry import get_all, refresh_all
+    import asyncio
+
+    # Фоновое обновление реестра (не ждём)
+    asyncio.ensure_future(refresh_all())
+
+    registry = get_all()
     pvzs = []
     warning = None
 
-    # Ozon
-    try:
-        from ozon.scraper import _get_all_stores
-        stores = await _get_all_stores()
-        for s in stores:
+    for platform in ("ozon", "wb", "ym"):
+        for p in registry.get(platform, []):
             pvzs.append({
-                "platform": "ozon",
-                "pvz_id": str(s["id"]),
-                "pvz_name": s.get("name") or str(s["id"]),
+                "platform": platform,
+                "pvz_id": p.get("pvz_id"),
+                "pvz_name": p["pvz_name"],
             })
-    except Exception:
-        pass
 
-    # Яндекс Маркет
-    try:
-        from datetime import date
-        from yandex.reports import download_report_xlsx, available_months_for_menu
-        from yandex.xlsx_parser import parse_ym_xlsx
-        months = available_months_for_menu(1)
-        if months:
-            m = months[0]
-            xlsx_bytes = await download_report_xlsx(m["month"], m["year"])
-            ym_data = parse_ym_xlsx(xlsx_bytes)
-            for name in ym_data.keys():
-                pvzs.append({
-                    "platform": "ym",
-                    "pvz_id": None,
-                    "pvz_name": name,
-                })
-    except Exception:
-        warning = "⚠️ Яндекс Маркет недоступен — показываю только Ozon ПВЗ."
-
-    # Wildberries (из сохранённых отчётов в БД)
-    try:
-        from db.database import get_wb_pvz_names
-        wb_names = await get_wb_pvz_names()
-        for name in wb_names:
-            pvzs.append({
-                "platform": "wb",
-                "pvz_id": None,
-                "pvz_name": name,
-            })
-    except Exception:
-        pass
+    if not any(p["platform"] == "ym" for p in pvzs):
+        warning = "⚠️ Яндекс Маркет: ПВЗ ещё не загружены (обновляется в фоне)."
 
     return pvzs, warning
 

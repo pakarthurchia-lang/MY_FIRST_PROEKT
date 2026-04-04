@@ -95,6 +95,8 @@ async def scrape_claims() -> list:
         claim = {
             "id": str(c["claimId"]),
             "pvz": pvz_name,
+            "store_id": str(c.get("pickPointId", "")),
+            "request_type": c.get("requestType", "Claim"),
             "claim_type": CLAIM_TYPE_RU.get(claim_type_en, claim_type_en),
             "reason": CLAIM_TYPE_RU.get(claim_type_en, claim_type_en),
             "amount": c.get("amount", {}).get("decimalValue", 0),
