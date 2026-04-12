@@ -1,0 +1,156 @@
+"""
+Nutrition lookup: FatSecret first, Claude as fallback.
+
+FatSecret gives exact data for known/packaged products.
+Claude handles generic foods, cooking variations, colloquial names.
+"""
+from __future__ import annotations
+import json
+import re
+from anthropic import AsyncAnthropic
+import config
+from bot.services import fatsecret
+
+_client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+
+# ── Claude prompt ──────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """Ты — эксперт по питанию. Пользователь описывает что он съел (голосом или текстом, возможны ошибки распознавания).
+
+Твоя задача:
+1. Определить конкретный продукт или блюдо.
+2. Определить вес в граммах. Если не указан — используй типичную порцию.
+3. Рассчитать КБЖУ на 100г продукта (используй официальные таблицы состава продуктов).
+4. Рассчитать итоговый КБЖУ для указанного веса.
+
+Верни ТОЛЬКО валидный JSON без markdown, без пояснений:
+{
+  "food_name": "Название продукта (по-русски, точно)",
+  "weight_g": 200,
+  "per_100g": {
+    "kcal": 116,
+    "protein": 2.2,
+    "fat": 0.4,
+    "carbs": 25.0
+  },
+  "total": {
+    "kcal": 232,
+    "protein": 4.4,
+    "fat": 0.8,
+    "carbs": 50.0
+  }
+}
+
+Правила:
+- Если продукт не распознан — поле food_name = null, остальные поля = 0.
+- Всегда учитывай способ приготовления: вареный, жареный, сырой.
+- Числа округляй до 1 знака после запятой.
+"""
+
+EXTRACT_PROMPT = """Из текста пользователя извлеки название продукта и вес в граммах для поиска в базе данных.
+Верни ТОЛЬКО JSON:
+{"query": "название для поиска (по-английски, кратко)", "weight_g": 100, "food_name_ru": "название по-русски"}
+Если вес не указан — поставь типичную порцию.
+Примеры:
+- "творог 5% 200г" → {"query": "cottage cheese 5%", "weight_g": 200, "food_name_ru": "Творог 5%"}
+- "вареная куриная грудка 150 грамм" → {"query": "chicken breast boiled", "weight_g": 150, "food_name_ru": "Куриная грудка вареная"}
+- "гречка отварная 300г" → {"query": "buckwheat cooked", "weight_g": 300, "food_name_ru": "Гречка отварная"}
+"""
+
+
+# ── Main entry point ───────────────────────────────────────────────────────────
+
+async def parse_food(user_text: str):
+    """
+    Parse food description and return nutrition dict, or None if not recognized.
+
+    Tries FatSecret first, falls back to Claude.
+
+    Returns:
+        {
+            "food_name": str,
+            "weight_g": float,
+            "source": "fatsecret" | "claude",
+            "per_100g": {"kcal", "protein", "fat", "carbs"},
+            "total": {"kcal", "protein", "fat", "carbs"},
+        }
+    """
+    # Step 1: Ask Claude to extract search query + weight
+    if config.FATSECRET_CLIENT_ID:
+        extracted = await _extract_query(user_text)
+        if extracted:
+            query = extracted.get("query", "")
+            weight_g = float(extracted.get("weight_g", 100))
+            food_name_ru = extracted.get("food_name_ru", "")
+
+            # Step 2: Search FatSecret
+            results = await fatsecret.search_food(query, max_results=1)
+            if results:
+                best = results[0]
+                # best["kcal"] etc. are per-100g values from description
+                per100_kcal    = best["kcal"]
+                per100_protein = best["protein"]
+                per100_fat     = best["fat"]
+                per100_carbs   = best["carbs"]
+
+                factor = weight_g / 100
+                return {
+                    "food_name": food_name_ru or best["food_name"],
+                    "weight_g": weight_g,
+                    "source": "fatsecret",
+                    "per_100g": {
+                        "kcal": round(per100_kcal, 1),
+                        "protein": round(per100_protein, 1),
+                        "fat": round(per100_fat, 1),
+                        "carbs": round(per100_carbs, 1),
+                    },
+                    "total": {
+                        "kcal": round(per100_kcal * factor, 1),
+                        "protein": round(per100_protein * factor, 1),
+                        "fat": round(per100_fat * factor, 1),
+                        "carbs": round(per100_carbs * factor, 1),
+                    },
+                }
+
+    # Step 3: Fallback to Claude
+    return await _claude_parse(user_text)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+async def _extract_query(user_text: str):
+    response = await _client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=128,
+        system=EXTRACT_PROMPT,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    raw = response.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+async def _claude_parse(user_text: str):
+    response = await _client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    raw = response.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    if not data.get("food_name"):
+        return None
+
+    data["source"] = "claude"
+    return data
