@@ -21,16 +21,23 @@ from datetime import date
 
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.services import stt, nutrition
 from bot.services.intent import detect_intent
+from bot.services import barcode as barcode_svc
+from bot.services import fatsecret
 from bot.keyboards.menus import confirm_food_kb, meal_type_kb, MEAL_TYPES
 from db import database
 
 router = Router()
 
 _pending: dict[str, dict] = {}
+
+
+class BarcodeForm(StatesGroup):
+    weight = State()
 
 MEAL_ICONS = {
     "breakfast": "Завтрак",
@@ -366,3 +373,87 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
         parse_mode="HTML",
     )
     await callback.answer("Записано!")
+
+
+# ── Barcode (photo) handler ────────────────────────────────────────────────────
+
+@router.message(F.photo)
+async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) -> None:
+    await database.ensure_user(message.from_user.id, message.from_user.username)
+    status = await message.answer("Читаю штрихкод...")
+
+    # Download the largest photo size
+    photo = message.photo[-1]
+    file  = await bot.get_file(photo.file_id)
+    buf   = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+
+    barcode = barcode_svc.decode_barcode(buf.getvalue())
+    if not barcode:
+        await status.edit_text(
+            "Не удалось распознать штрихкод.\n"
+            "Убедись, что код хорошо освещён и не смазан."
+        )
+        return
+
+    await status.edit_text(f"Штрихкод: <code>{barcode}</code>\nИщу в базе...")
+
+    nutrition_data = await fatsecret.find_by_barcode(barcode)
+    if not nutrition_data:
+        await status.edit_text(
+            f"Штрихкод <code>{barcode}</code> не найден в базе FatSecret.\n"
+            "Попробуй добавить продукт голосом или текстом.",
+            parse_mode="HTML",
+        )
+        return
+
+    # Ask for weight
+    await state.set_state(BarcodeForm.weight)
+    await state.update_data(nutrition=nutrition_data)
+    await status.edit_text(
+        f"<b>{nutrition_data['food_name']}</b>\n"
+        f"(на 100г: {nutrition_data['kcal']:.0f} ккал, "
+        f"Б {nutrition_data['protein']:.1f}г, "
+        f"Ж {nutrition_data['fat']:.1f}г, "
+        f"У {nutrition_data['carbs']:.1f}г)\n\n"
+        "Сколько граммов ты съел?",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BarcodeForm.weight)
+async def handle_barcode_weight(message: Message, state: FSMContext) -> None:
+    text = message.text.strip().replace(",", ".")
+    try:
+        weight_g = float(text)
+        if weight_g <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Введи число граммов, например: 150")
+        return
+
+    fsm_data = await state.get_data()
+    await state.clear()
+
+    raw = fsm_data["nutrition"]  # per 100g values from FatSecret
+    ratio = weight_g / 100.0
+    data = {
+        "food_name": raw["food_name"],
+        "weight_g":  weight_g,
+        "source":    "fatsecret",
+        "total": {
+            "kcal":    round(raw["kcal"]    * ratio, 1),
+            "protein": round(raw["protein"] * ratio, 1),
+            "fat":     round(raw["fat"]     * ratio, 1),
+            "carbs":   round(raw["carbs"]   * ratio, 1),
+        },
+    }
+
+    key = _make_key(data, message.from_user.id)
+    _pending[key] = {"type": "add", "data": data, "user_id": message.from_user.id}
+
+    await message.answer(
+        f"{_format_nutrition_card(data)}\n\nДобавить в дневник?",
+        reply_markup=confirm_food_kb(key),
+        parse_mode="HTML",
+    )

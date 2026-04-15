@@ -131,6 +131,37 @@ async def get_food_by_id(food_id: str) -> dict | None:
         return None
 
 
+async def find_by_barcode(barcode: str) -> dict | None:
+    """
+    Look up product by barcode via FatSecret.
+    Returns nutrition per 100g or None if not found.
+    """
+    if not config.FATSECRET_CLIENT_ID:
+        return None
+
+    token = await _get_token()
+
+    # Step 1: barcode → food_id
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            API_URL,
+            params={
+                "method": "food.find_id_for_barcode",
+                "barcode": barcode,
+                "format": "json",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        ) as resp:
+            data = await resp.json()
+
+    food_id = data.get("food_id", {}).get("value")
+    if not food_id:
+        return None
+
+    # Step 2: food_id → nutrition
+    return await get_food_by_id(food_id)
+
+
 def _parse_description(desc: str) -> dict | None:
     """Parse 'Per 100g - Calories: 116kcal | Fat: 0.37g | Carbs: 25.08g | Protein: 2.69g'"""
     import re
