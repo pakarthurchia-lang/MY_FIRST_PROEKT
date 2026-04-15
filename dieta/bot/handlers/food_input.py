@@ -25,7 +25,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.services import stt, nutrition
-from bot.services.intent import detect_intent
+from bot.services.intent import detect_intent, format_diary_readable
 from bot.services import barcode as barcode_svc
 from bot.services import fatsecret
 from bot.keyboards.menus import confirm_food_kb, meal_type_kb, MEAL_TYPES
@@ -204,7 +204,14 @@ async def _handle_delete_confirm(message: Message, status_msg, intent_data: dict
     entry_id = intent_data.get("entry_id")
     entry    = await database.get_entry(entry_id, user_id) if entry_id else None
     if not entry:
-        await status_msg.edit_text("Не нашёл такую запись. Открой /diary и удали вручную.")
+        today   = date.today().isoformat()
+        entries = await database.get_day_entries(user_id, today)
+        diary   = format_diary_readable(entries)
+        await status_msg.edit_text(
+            f"Не нашёл такую запись. Уточни название.\n\n<b>Сегодня в дневнике:</b>\n{diary}\n\n"
+            "Скажи, например: «удали рис» или «убери последнее».",
+            parse_mode="HTML",
+        )
         return
     key = _make_key(intent_data, user_id)
     _pending[key] = {"type": "delete", "entry_id": entry_id, "user_id": user_id}
@@ -223,7 +230,14 @@ async def _handle_edit_weight_confirm(message: Message, status_msg, intent_data:
     new_weight = intent_data.get("new_weight_g")
     entry      = await database.get_entry(entry_id, user_id) if entry_id else None
     if not entry or not new_weight:
-        await status_msg.edit_text("Не понял запись или новый вес. Открой /diary.")
+        today   = date.today().isoformat()
+        entries = await database.get_day_entries(user_id, today)
+        diary   = format_diary_readable(entries)
+        await status_msg.edit_text(
+            f"Не понял запись или новый вес.\n\n<b>Сегодня в дневнике:</b>\n{diary}\n\n"
+            "Скажи, например: «рис было не 200 а 150 грамм».",
+            parse_mode="HTML",
+        )
         return
     ratio = float(new_weight) / entry["weight_g"]
     key = _make_key(intent_data, user_id)
@@ -244,7 +258,14 @@ async def _handle_edit_meal_confirm(message: Message, status_msg, intent_data: d
     new_meal = intent_data.get("new_meal_type")
     entry    = await database.get_entry(entry_id, user_id) if entry_id else None
     if not entry or not new_meal:
-        await status_msg.edit_text("Не понял запись или приём пищи. Открой /diary.")
+        today   = date.today().isoformat()
+        entries = await database.get_day_entries(user_id, today)
+        diary   = format_diary_readable(entries)
+        await status_msg.edit_text(
+            f"Не понял запись или приём пищи.\n\n<b>Сегодня в дневнике:</b>\n{diary}\n\n"
+            "Скажи, например: «рис перенеси на завтрак» или «это был перекус».",
+            parse_mode="HTML",
+        )
         return
     key = _make_key(intent_data, user_id)
     _pending[key] = {"type": "edit_meal", "entry_id": entry_id, "new_meal_type": new_meal, "user_id": user_id}
@@ -263,7 +284,14 @@ async def _handle_edit_name_confirm(message: Message, status_msg, intent_data: d
     new_name = intent_data.get("new_name", "").strip()
     entry    = await database.get_entry(entry_id, user_id) if entry_id else None
     if not entry or not new_name:
-        await status_msg.edit_text("Не понял запись или новое название. Открой /diary.")
+        today   = date.today().isoformat()
+        entries = await database.get_day_entries(user_id, today)
+        diary   = format_diary_readable(entries)
+        await status_msg.edit_text(
+            f"Не понял запись или новое название.\n\n<b>Сегодня в дневнике:</b>\n{diary}\n\n"
+            "Скажи, например: «переименуй рис в бурый рис».",
+            parse_mode="HTML",
+        )
         return
     key = _make_key(intent_data, user_id)
     _pending[key] = {"type": "edit_name", "entry_id": entry_id, "new_name": new_name, "user_id": user_id}
