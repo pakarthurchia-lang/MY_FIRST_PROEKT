@@ -17,6 +17,7 @@ Intents routed here:
 import io
 import re
 import json
+import asyncio
 import hashlib
 from datetime import date
 
@@ -235,26 +236,56 @@ async def _process(message: Message, status_msg, text: str, state: FSMContext) -
 
 async def _handle_add(message: Message, status_msg, text: str) -> None:
     try:
-        data = await nutrition.parse_food(text)
+        foods = await nutrition.parse_multiple_foods(text)
     except Exception as e:
         await status_msg.edit_text(f"Ошибка при анализе: {e}")
         return
 
-    if not data:
+    if not foods:
         await status_msg.edit_text(
             f"Не смог распознать продукт из текста:\n«{text}»\n\n"
             "Попробуй точнее, например: «куриная грудка вареная 150г»"
         )
         return
 
-    key = _make_key(data, message.from_user.id)
-    _pending[key] = {"type": "add", "data": data, "user_id": message.from_user.id}
+    if len(foods) == 1:
+        # Single food — existing flow
+        data = foods[0]
+        key = _make_key(data, message.from_user.id)
+        _pending[key] = {"type": "add", "data": data, "user_id": message.from_user.id}
+        await status_msg.edit_text(
+            f"{_format_nutrition_card(data)}\n\nДобавить в дневник?",
+            reply_markup=confirm_food_kb(key),
+            parse_mode="HTML",
+        )
+    else:
+        # Multiple foods — combined card
+        key = _make_key({"multi": [f["food_name"] for f in foods]}, message.from_user.id)
+        _pending[key] = {"type": "add_multi", "foods": foods, "user_id": message.from_user.id}
+        await status_msg.edit_text(
+            _format_multi_card(foods) + "\n\nДобавить всё в дневник?",
+            reply_markup=confirm_food_kb(key),
+            parse_mode="HTML",
+        )
 
-    await status_msg.edit_text(
-        f"{_format_nutrition_card(data)}\n\nДобавить в дневник?",
-        reply_markup=confirm_food_kb(key),
-        parse_mode="HTML",
+
+def _format_multi_card(foods: list[dict]) -> str:
+    lines = [f"<b>Распознано продуктов: {len(foods)}</b>\n"]
+    total = {"kcal": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0}
+    for f in foods:
+        t = f["total"]
+        src = " <i>(FatSecret)</i>" if f.get("source") == "fatsecret" else " <i>(ИИ)</i>"
+        lines.append(
+            f"• <b>{f['food_name']}</b> — {f['weight_g']} г{src}\n"
+            f"  {t['kcal']} ккал | Б {t['protein']}г | Ж {t['fat']}г | У {t['carbs']}г"
+        )
+        for k in total:
+            total[k] += t[k]
+    lines.append(
+        f"\n<b>Итого:</b> {total['kcal']:.0f} ккал | "
+        f"Б {total['protein']:.1f}г | Ж {total['fat']:.1f}г | У {total['carbs']:.1f}г"
     )
+    return "\n".join(lines)
 
 
 # ── Delete ALL confirm ────────────────────────────────────────────────────────
@@ -440,8 +471,14 @@ async def cb_confirm_add(callback: CallbackQuery) -> None:
     if not pending or pending["user_id"] != callback.from_user.id:
         await callback.answer("Запись устарела, введи заново.", show_alert=True)
         return
+
+    if pending["type"] == "add_multi":
+        preview = _format_multi_card(pending["foods"])
+    else:
+        preview = _format_nutrition_card(pending["data"])
+
     await callback.message.edit_text(
-        _format_nutrition_card(pending["data"]) + "\n\nВыбери приём пищи:",
+        preview + "\n\nВыбери приём пищи:",
         reply_markup=meal_type_kb(key),
         parse_mode="HTML",
     )
@@ -462,26 +499,44 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
         await callback.answer("Запись устарела.", show_alert=True)
         return
 
-    data    = pending["data"]
-    user_id = callback.from_user.id
-    today   = date.today().isoformat()
-
-    await database.add_entry(
-        user_id=user_id, entry_date=today, meal_type=meal_type,
-        food_name=data["food_name"], weight_g=data["weight_g"],
-        kcal=data["total"]["kcal"], protein=data["total"]["protein"],
-        fat=data["total"]["fat"], carbs=data["total"]["carbs"],
-    )
-
-    totals     = await database.get_day_totals(user_id, today)
-    goals      = await database.get_user_goals(user_id)
+    user_id    = callback.from_user.id
+    today      = date.today().isoformat()
     meal_label = MEAL_TYPES.get(meal_type, meal_type)
 
-    await callback.message.edit_text(
-        f"Добавлено в <b>{meal_label}</b>: {data['food_name']} {data['weight_g']} г"
-        + _format_totals(totals, goals),
-        parse_mode="HTML",
-    )
+    if pending["type"] == "add_multi":
+        # Save all foods in parallel
+        await asyncio.gather(*[
+            database.add_entry(
+                user_id=user_id, entry_date=today, meal_type=meal_type,
+                food_name=f["food_name"], weight_g=f["weight_g"],
+                kcal=f["total"]["kcal"], protein=f["total"]["protein"],
+                fat=f["total"]["fat"], carbs=f["total"]["carbs"],
+            )
+            for f in pending["foods"]
+        ])
+        totals = await database.get_day_totals(user_id, today)
+        goals  = await database.get_user_goals(user_id)
+        names  = ", ".join(f["food_name"] for f in pending["foods"])
+        await callback.message.edit_text(
+            f"Добавлено в <b>{meal_label}</b>: {names}"
+            + _format_totals(totals, goals),
+            parse_mode="HTML",
+        )
+    else:
+        data = pending["data"]
+        await database.add_entry(
+            user_id=user_id, entry_date=today, meal_type=meal_type,
+            food_name=data["food_name"], weight_g=data["weight_g"],
+            kcal=data["total"]["kcal"], protein=data["total"]["protein"],
+            fat=data["total"]["fat"], carbs=data["total"]["carbs"],
+        )
+        totals = await database.get_day_totals(user_id, today)
+        goals  = await database.get_user_goals(user_id)
+        await callback.message.edit_text(
+            f"Добавлено в <b>{meal_label}</b>: {data['food_name']} {data['weight_g']} г"
+            + _format_totals(totals, goals),
+            parse_mode="HTML",
+        )
     await callback.answer("Записано!")
 
 

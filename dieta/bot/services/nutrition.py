@@ -5,6 +5,7 @@ FatSecret gives exact data for known/packaged products.
 Claude handles generic foods, cooking variations, colloquial names.
 """
 from __future__ import annotations
+import asyncio
 import json
 import re
 from anthropic import AsyncAnthropic
@@ -57,6 +58,20 @@ EXTRACT_PROMPT = """Из текста пользователя извлеки н
 - "творог 5% 200г" → {"query": "cottage cheese 5%", "weight_g": 200, "food_name_ru": "Творог 5%"}
 - "вареная куриная грудка 150 грамм" → {"query": "chicken breast boiled", "weight_g": 150, "food_name_ru": "Куриная грудка вареная"}
 - "гречка отварная 300г" → {"query": "buckwheat cooked", "weight_g": 300, "food_name_ru": "Гречка отварная"}
+"""
+
+SPLIT_PROMPT = """Из фразы пользователя извлеки список отдельных продуктов или блюд.
+Верни ТОЛЬКО JSON-массив строк, каждая строка — один продукт с количеством/весом.
+Если продукт один — массив из одного элемента.
+
+Примеры:
+- "съел 3 жареных яйца и хлеб 50 грамм" → ["3 жареных яйца", "хлеб 50 грамм"]
+- "гречка 200г с куриной грудкой 150г" → ["гречка варёная 200г", "куриная грудка 150г"]
+- "выпил кефир 200мл и съел творог 100г" → ["кефир 200мл", "творог 100г"]
+- "яблоко" → ["яблоко"]
+- "овсянка на молоке 300г" → ["овсянка на молоке 300г"]
+
+Важно: сохраняй способ приготовления и количество из исходного текста.
 """
 
 
@@ -134,6 +149,37 @@ async def _extract_query(user_text: str):
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+
+async def _split_foods(user_text: str) -> list[str]:
+    """Use Claude Haiku to split text into individual food descriptions."""
+    response = await _client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=256,
+        system=SPLIT_PROMPT,
+        messages=[{"role": "user", "content": user_text}],
+    )
+    raw = response.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        items = json.loads(raw)
+        if isinstance(items, list) and items:
+            return [str(i).strip() for i in items if str(i).strip()]
+    except json.JSONDecodeError:
+        pass
+    return [user_text]  # fallback: treat whole text as one food
+
+
+async def parse_multiple_foods(user_text: str) -> list[dict]:
+    """
+    Parse one or more foods from user text.
+    Returns list of nutrition dicts (same format as parse_food).
+    """
+    food_texts = await _split_foods(user_text)
+    # Parse all foods in parallel
+    results = await asyncio.gather(*[parse_food(t) for t in food_texts])
+    return [r for r in results if r is not None]
 
 
 async def _claude_parse(user_text: str):
