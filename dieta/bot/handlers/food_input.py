@@ -62,6 +62,26 @@ _CMD_PATTERN = re.compile(
 def _looks_like_command(text: str) -> bool:
     return bool(_CMD_PATTERN.search(text))
 
+# Жёсткие паттерны для команд, которые Claude часто не ловит
+_RE_DELETE_ALL = re.compile(
+    r'удал[ии]?\s*(все|всё|всех|все\s*записи|весь\s*дневник)|'
+    r'очисти\s*дневник|сброс\s*дня|стёр\s*(все|всё)',
+    re.IGNORECASE | re.UNICODE,
+)
+_RE_SHOW_KBJU = re.compile(
+    r'покажи?\s*кбжу|сколько\s*(калорий|ккал|белков|углеводов)|'
+    r'мои\s*макросы|прогресс\s*дня|что\s*я\s*съел',
+    re.IGNORECASE | re.UNICODE,
+)
+
+def _keyword_intent(text: str) -> str | None:
+    """Fast regex pre-check before calling Claude."""
+    if _RE_DELETE_ALL.search(text):
+        return "delete_all"
+    if _RE_SHOW_KBJU.search(text):
+        return "show_kbju"
+    return None
+
 
 # ── Formatters ─────────────────────────────────────────────────────────────────
 
@@ -155,8 +175,14 @@ async def _process(message: Message, status_msg, text: str, state: FSMContext) -
     today   = date.today().isoformat()
     entries = await database.get_day_entries(user_id, today)
 
-    intent_data = await detect_intent(text, entries)
-    intent      = intent_data.get("intent", "unknown")
+    # Быстрый regex-check до вызова Claude — для очевидных команд
+    kw = _keyword_intent(text)
+    if kw:
+        intent_data = {"intent": kw}
+        intent = kw
+    else:
+        intent_data = await detect_intent(text, entries)
+        intent      = intent_data.get("intent", "unknown")
 
     if intent == "show_kbju":
         await status_msg.delete()
