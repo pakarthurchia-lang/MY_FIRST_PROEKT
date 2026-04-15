@@ -380,9 +380,15 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
 @router.message(F.photo)
 async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) -> None:
     await database.ensure_user(message.from_user.id, message.from_user.username)
+
+    # Delete user photo to keep chat clean
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     status = await message.answer("Читаю штрихкод...")
 
-    # Download the largest photo size
     photo = message.photo[-1]
     file  = await bot.get_file(photo.file_id)
     buf   = io.BytesIO()
@@ -396,7 +402,7 @@ async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) ->
         )
         return
 
-    await status.edit_text(f"Штрихкод: <code>{barcode}</code>\nИщу в базе...")
+    await status.edit_text(f"Штрихкод: <code>{barcode}</code>\nИщу в базе...", parse_mode="HTML")
 
     nutrition_data = await fatsecret.find_by_barcode(barcode)
     if not nutrition_data:
@@ -407,7 +413,6 @@ async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) ->
         )
         return
 
-    # Ask for weight
     await state.set_state(BarcodeForm.weight)
     await state.update_data(nutrition=nutrition_data)
     await status.edit_text(
@@ -416,28 +421,28 @@ async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) ->
         f"Б {nutrition_data['protein']:.1f}г, "
         f"Ж {nutrition_data['fat']:.1f}г, "
         f"У {nutrition_data['carbs']:.1f}г)\n\n"
-        "Сколько граммов ты съел?",
+        "Сколько граммов ты съел? (напиши или скажи голосом)",
         parse_mode="HTML",
     )
 
 
-@router.message(BarcodeForm.weight)
-async def handle_barcode_weight(message: Message, state: FSMContext) -> None:
-    text = message.text.strip().replace(",", ".")
-    try:
-        weight_g = float(text)
-        if weight_g <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Введи число граммов, например: 150")
-        return
+def _extract_weight(text: str) -> float | None:
+    """Extract first positive number from text (handles '150', '150г', '150.5')."""
+    import re
+    m = re.search(r'\b(\d+(?:[.,]\d+)?)', text)
+    if m:
+        val = float(m.group(1).replace(',', '.'))
+        return val if val > 0 else None
+    return None
 
+
+async def _save_barcode_entry(weight_g: float, message: Message, state: FSMContext) -> None:
     fsm_data = await state.get_data()
     await state.clear()
 
-    raw = fsm_data["nutrition"]  # per 100g values from FatSecret
+    raw   = fsm_data["nutrition"]
     ratio = weight_g / 100.0
-    data = {
+    data  = {
         "food_name": raw["food_name"],
         "weight_g":  weight_g,
         "source":    "fatsecret",
@@ -448,7 +453,6 @@ async def handle_barcode_weight(message: Message, state: FSMContext) -> None:
             "carbs":   round(raw["carbs"]   * ratio, 1),
         },
     }
-
     key = _make_key(data, message.from_user.id)
     _pending[key] = {"type": "add", "data": data, "user_id": message.from_user.id}
 
@@ -457,3 +461,37 @@ async def handle_barcode_weight(message: Message, state: FSMContext) -> None:
         reply_markup=confirm_food_kb(key),
         parse_mode="HTML",
     )
+
+
+@router.message(BarcodeForm.weight, F.text)
+async def handle_barcode_weight_text(message: Message, state: FSMContext) -> None:
+    weight_g = _extract_weight(message.text)
+    if not weight_g:
+        await message.answer("Не понял. Напиши вес в граммах, например: 150")
+        return
+    await _save_barcode_entry(weight_g, message, state)
+
+
+@router.message(BarcodeForm.weight, F.voice)
+async def handle_barcode_weight_voice(message: Message, bot: Bot, state: FSMContext) -> None:
+    status = await message.answer("Распознаю голос...")
+
+    voice_file = await bot.get_file(message.voice.file_id)
+    buf = io.BytesIO()
+    await bot.download_file(voice_file.file_path, destination=buf)
+
+    try:
+        text = await stt.transcribe(buf.getvalue())
+    except Exception as e:
+        await status.edit_text(f"Не удалось распознать голос: {e}")
+        return
+
+    weight_g = _extract_weight(text)
+    if not weight_g:
+        await status.edit_text(
+            f"Слышу: «{text}»\n\nНе нашёл число граммов. Скажи цифру, например: «150»"
+        )
+        return
+
+    await status.delete()
+    await _save_barcode_entry(weight_g, message, state)
