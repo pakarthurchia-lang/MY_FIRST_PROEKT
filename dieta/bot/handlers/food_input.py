@@ -109,6 +109,13 @@ async def handle_voice(message: Message, bot: Bot, state: FSMContext) -> None:
         await status.edit_text(f"Не удалось распознать голос: {e}")
         return
 
+    if not text or len(text.strip()) < 3:
+        await status.edit_text(
+            "Не расслышал — запись слишком короткая или тихая.\n"
+            "Попробуй ещё раз или напиши текстом."
+        )
+        return
+
     await status.edit_text(f"Слышу: «{text}»\nАнализирую...")
     await _process(message, status, text, state)
 
@@ -183,8 +190,8 @@ async def _handle_add(message: Message, status_msg, text: str) -> None:
 
     if not data:
         await status_msg.edit_text(
-            "Не смог распознать продукт. Попробуй точнее.\n"
-            "Например: «куриная грудка вареная 150г»"
+            f"Не смог распознать продукт из текста:\n«{text}»\n\n"
+            "Попробуй точнее, например: «куриная грудка вареная 150г»"
         )
         return
 
