@@ -15,6 +15,7 @@ Intents routed here:
   unknown     → fallback to add_food
 """
 import io
+import re
 import json
 import hashlib
 from datetime import date
@@ -49,6 +50,17 @@ MEAL_ICONS = {
 
 # Buttons handled by other routers — must be excluded here
 _MENU_BUTTONS = {"📊 Дневник", "📈 Статистика", "⚙️ Настройки", "⚡ КБЖУ", "📋 Журнал"}
+
+# Слова-команды — если текст содержит их, это точно не еда
+_CMD_PATTERN = re.compile(
+    r'\b(удал[ие]|убер[ие]|стёр|очист|измен[ие]|поменя[йи]|перенес[ие]|'
+    r'переименуй|начать|начни|закрой|закрыть|завершить|покажи|показать|'
+    r'сброс|очисти)\b',
+    re.IGNORECASE | re.UNICODE,
+)
+
+def _looks_like_command(text: str) -> bool:
+    return bool(_CMD_PATTERN.search(text))
 
 
 # ── Formatters ─────────────────────────────────────────────────────────────────
@@ -178,8 +190,18 @@ async def _process(message: Message, status_msg, text: str, state: FSMContext) -
         await _handle_edit_name_confirm(message, status_msg, intent_data, user_id)
 
     else:
-        # add_food or unknown → try nutrition parse
-        await _handle_add(message, status_msg, text)
+        # add_food or unknown
+        if _looks_like_command(text):
+            # Явная команда, но интент не распознан — подсказать
+            await status_msg.edit_text(
+                "Не понял команду. Попробуй переформулировать, например:\n\n"
+                "«удали рис» • «удали все записи»\n"
+                "«измени рис на 150 грамм»\n"
+                "«рис перенеси на завтрак»\n"
+                "«покажи КБЖУ» • «закрыть день»"
+            )
+        else:
+            await _handle_add(message, status_msg, text)
 
 
 # ── Add food ───────────────────────────────────────────────────────────────────
