@@ -162,6 +162,9 @@ async def _process(message: Message, status_msg, text: str, state: FSMContext) -
         await status_msg.delete()
         await handle_show_journal(message)
 
+    elif intent == "delete_all":
+        await _handle_delete_all_confirm(message, status_msg, user_id)
+
     elif intent == "delete":
         await _handle_delete_confirm(message, status_msg, intent_data, user_id)
 
@@ -201,6 +204,24 @@ async def _handle_add(message: Message, status_msg, text: str) -> None:
     await status_msg.edit_text(
         f"{_format_nutrition_card(data)}\n\nДобавить в дневник?",
         reply_markup=confirm_food_kb(key),
+        parse_mode="HTML",
+    )
+
+
+# ── Delete ALL confirm ────────────────────────────────────────────────────────
+
+async def _handle_delete_all_confirm(message: Message, status_msg, user_id: int) -> None:
+    today   = date.today().isoformat()
+    entries = await database.get_day_entries(user_id, today)
+    if not entries:
+        await status_msg.edit_text("Дневник за сегодня уже пуст.")
+        return
+    key = _make_key({"delete_all": today}, user_id)
+    _pending[key] = {"type": "delete_all", "date": today, "user_id": user_id}
+    diary = format_diary_readable(entries)
+    await status_msg.edit_text(
+        f"Удалить <b>все {len(entries)} записи</b> за сегодня?\n\n{diary}",
+        reply_markup=_action_confirm_kb(key, "da"),
         parse_mode="HTML",
     )
 
@@ -322,7 +343,12 @@ async def cb_voice_action_ok(callback: CallbackQuery) -> None:
     user_id = callback.from_user.id
     today   = date.today().isoformat()
 
-    if action == "del":
+    if action == "da":
+        count = await database.delete_all_entries(user_id, today)
+        await callback.answer("Дневник очищен.")
+        await callback.message.edit_text(f"Удалено записей: {count}. Дневник за сегодня пуст.")
+
+    elif action == "del":
         await database.delete_entry(pending["entry_id"], user_id)
         await callback.answer("Удалено.")
         totals = await database.get_day_totals(user_id, today)

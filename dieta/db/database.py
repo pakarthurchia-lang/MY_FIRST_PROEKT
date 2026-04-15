@@ -142,6 +142,17 @@ async def delete_entry(entry_id: int, user_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+async def delete_all_entries(user_id: int, entry_date: str) -> int:
+    """Delete all entries for a given date. Returns count of deleted rows."""
+    async with aiosqlite.connect(config.DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM food_entries WHERE user_id = ? AND entry_date = ?",
+            (user_id, entry_date),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
 async def get_day_entries(user_id: int, entry_date: str) -> list[dict]:
     async with aiosqlite.connect(config.DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
