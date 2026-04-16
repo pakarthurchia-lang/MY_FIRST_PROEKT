@@ -121,21 +121,42 @@ async def form_carbs(message: Message, state: FSMContext) -> None:
         return
 
     data = await state.get_data()
-    await state.clear()
 
+    # Проверка: сумма калорий из БЖУ должна совпадать с целью
+    macro_kcal = data["protein"] * 4 + data["fat"] * 9 + val * 4
+    goal_kcal  = data["kcal"]
+    diff       = abs(macro_kcal - goal_kcal)
+
+    if diff > 50:  # допуск 50 ккал
+        await message.answer(
+            f"⚠️ <b>Ошибка в расчётах!</b>\n\n"
+            f"Белки {data['protein']}г × 4 = {data['protein']*4} ккал\n"
+            f"Жиры  {data['fat']}г × 9 = {data['fat']*9} ккал\n"
+            f"Углев {val}г × 4 = {val*4} ккал\n"
+            f"<b>Итого: {macro_kcal} ккал</b> — а цель {goal_kcal} ккал "
+            f"(расхождение {diff} ккал).\n\n"
+            f"Введи углеводы заново так, чтобы сумма сошлась.\n"
+            f"Подсказка: <code>{max(0, round((goal_kcal - data['protein']*4 - data['fat']*9) / 4))}</code> г",
+            reply_markup=cancel_kb(),
+            parse_mode="HTML",
+        )
+        return  # остаёмся в состоянии SettingsForm.carbs
+
+    await state.clear()
     await database.update_user_goals(
         user_id=message.from_user.id,
-        goal_kcal=data["kcal"],
+        goal_kcal=goal_kcal,
         goal_protein=data["protein"],
         goal_fat=data["fat"],
         goal_carbs=val,
     )
     await message.answer(
         f"✅ <b>Цели обновлены!</b>\n\n"
-        f"🔥 Калории:  <b>{data['kcal']}</b> ккал\n"
-        f"🥩 Белки:    <b>{data['protein']}</b> г\n"
-        f"🧈 Жиры:     <b>{data['fat']}</b> г\n"
-        f"🍞 Углеводы: <b>{val}</b> г",
+        f"🔥 Калории:  <b>{goal_kcal}</b> ккал\n"
+        f"🥩 Белки:    <b>{data['protein']}</b> г = {data['protein']*4} ккал\n"
+        f"🧈 Жиры:     <b>{data['fat']}</b> г = {data['fat']*9} ккал\n"
+        f"🍞 Углеводы: <b>{val}</b> г = {val*4} ккал\n"
+        f"<i>Сумма: {macro_kcal} ккал ✓</i>",
         parse_mode="HTML",
     )
 
