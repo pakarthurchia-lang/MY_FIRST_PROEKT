@@ -81,6 +81,14 @@ def diary_nav_kb(entry_date: str) -> InlineKeyboardMarkup:
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
+def settings_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить цели", callback_data="edit_goals")],
+        ]
+    )
+
+
 def cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

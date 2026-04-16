@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 
 from db import database
-from bot.keyboards.menus import cancel_kb
+from bot.keyboards.menus import cancel_kb, settings_kb
 
 router = Router()
 
@@ -22,12 +22,12 @@ async def _show_settings(message: Message) -> None:
     user_id = message.from_user.id
     goals = await database.get_user_goals(user_id)
     await message.answer(
-        f"<b>Текущие цели:</b>\n"
-        f"Калории: {goals['goal_kcal']} ккал\n"
-        f"Белки:   {goals['goal_protein']} г\n"
-        f"Жиры:    {goals['goal_fat']} г\n"
-        f"Углеводы:{goals['goal_carbs']} г\n\n"
-        f"Хочешь изменить? Нажми /set_goals",
+        f"<b>Текущие цели на день:</b>\n\n"
+        f"🔥 Калории:  <b>{goals['goal_kcal']}</b> ккал\n"
+        f"🥩 Белки:    <b>{goals['goal_protein']}</b> г\n"
+        f"🧈 Жиры:     <b>{goals['goal_fat']}</b> г\n"
+        f"🍞 Углеводы: <b>{goals['goal_carbs']}</b> г",
+        reply_markup=settings_kb(),
         parse_mode="HTML",
     )
 
@@ -44,11 +44,22 @@ async def btn_settings(message: Message) -> None:
 
 @router.message(Command("set_goals"))
 async def cmd_set_goals(message: Message, state: FSMContext) -> None:
+    await _start_goals_form(message, state)
+
+
+@router.callback_query(F.data == "edit_goals")
+async def cb_edit_goals(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _start_goals_form(callback.message, state)
+
+
+async def _start_goals_form(message: Message, state: FSMContext) -> None:
     await state.set_state(SettingsForm.kcal)
     await message.answer(
-        "Введи целевое количество калорий в день (ккал).\n"
-        "Например: 2000",
+        "Введи целевое количество <b>калорий</b> в день (ккал).\n"
+        "Например: <code>2000</code>",
         reply_markup=cancel_kb(),
+        parse_mode="HTML",
     )
 
 
@@ -62,7 +73,10 @@ async def form_kcal(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(kcal=val)
     await state.set_state(SettingsForm.protein)
-    await message.answer("Белки (г/день)? Например: 150", reply_markup=cancel_kb())
+    await message.answer(
+        "Теперь <b>белки</b> (г/день).\nНапример: <code>150</code>",
+        reply_markup=cancel_kb(), parse_mode="HTML"
+    )
 
 
 @router.message(SettingsForm.protein)
@@ -75,7 +89,10 @@ async def form_protein(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(protein=val)
     await state.set_state(SettingsForm.fat)
-    await message.answer("Жиры (г/день)? Например: 67", reply_markup=cancel_kb())
+    await message.answer(
+        "Теперь <b>жиры</b> (г/день).\nНапример: <code>67</code>",
+        reply_markup=cancel_kb(), parse_mode="HTML"
+    )
 
 
 @router.message(SettingsForm.fat)
@@ -88,7 +105,10 @@ async def form_fat(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(fat=val)
     await state.set_state(SettingsForm.carbs)
-    await message.answer("Углеводы (г/день)? Например: 250", reply_markup=cancel_kb())
+    await message.answer(
+        "И последнее — <b>углеводы</b> (г/день).\nНапример: <code>250</code>",
+        reply_markup=cancel_kb(), parse_mode="HTML"
+    )
 
 
 @router.message(SettingsForm.carbs)
@@ -111,11 +131,11 @@ async def form_carbs(message: Message, state: FSMContext) -> None:
         goal_carbs=val,
     )
     await message.answer(
-        f"Цели обновлены!\n"
-        f"Калории: {data['kcal']} ккал\n"
-        f"Белки:   {data['protein']} г\n"
-        f"Жиры:    {data['fat']} г\n"
-        f"Углеводы:{val} г",
+        f"✅ <b>Цели обновлены!</b>\n\n"
+        f"🔥 Калории:  <b>{data['kcal']}</b> ккал\n"
+        f"🥩 Белки:    <b>{data['protein']}</b> г\n"
+        f"🧈 Жиры:     <b>{data['fat']}</b> г\n"
+        f"🍞 Углеводы: <b>{val}</b> г",
         parse_mode="HTML",
     )
 
