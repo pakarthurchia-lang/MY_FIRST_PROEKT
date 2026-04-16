@@ -50,14 +50,22 @@ SYSTEM_PROMPT = """Ты — эксперт по питанию. Пользова
 - Числа округляй до 1 знака после запятой.
 """
 
-EXTRACT_PROMPT = """Из текста пользователя извлеки название продукта и вес в граммах для поиска в базе данных.
+EXTRACT_PROMPT = """Из текста пользователя извлеки название продукта и вес для поиска в базе FatSecret.
 Верни ТОЛЬКО JSON:
-{"query": "название для поиска (по-английски, кратко)", "weight_g": 100, "food_name_ru": "название по-русски"}
-Если вес не указан — поставь типичную порцию.
+{"query": "english name for search", "weight_g": 100, "food_name_ru": "точное русское название"}
+
+Правила для food_name_ru:
+- Сохраняй марку/бренд если указана: "Хлеб Аютинский цельнозерновой", "Творог Простоквашино 5%"
+- Сохраняй способ приготовления: "Гречка варёная", "Куриная грудка запечённая"
+- Сохраняй жирность: "Кефир 3.2%", "Творог 0%"
+- Если бренд не указан — пиши стандартное название: "Хлеб пшеничный", "Гречка варёная"
+
 Примеры:
-- "творог 5% 200г" → {"query": "cottage cheese 5%", "weight_g": 200, "food_name_ru": "Творог 5%"}
-- "вареная куриная грудка 150 грамм" → {"query": "chicken breast boiled", "weight_g": 150, "food_name_ru": "Куриная грудка вареная"}
-- "гречка отварная 300г" → {"query": "buckwheat cooked", "weight_g": 300, "food_name_ru": "Гречка отварная"}
+- "творог простоквашино 5% 200г" → {"query": "cottage cheese 5%", "weight_g": 200, "food_name_ru": "Творог Простоквашино 5%"}
+- "вареная куриная грудка 150 грамм" → {"query": "chicken breast boiled", "weight_g": 150, "food_name_ru": "Куриная грудка варёная"}
+- "гречка 300г" → {"query": "buckwheat cooked", "weight_g": 300, "food_name_ru": "Гречка варёная"}
+- "хлеб аютинский 50г" → {"query": "bread", "weight_g": 50, "food_name_ru": "Хлеб Аютинский"}
+- "кефир 3.2% 200мл" → {"query": "kefir 3.2%", "weight_g": 200, "food_name_ru": "Кефир 3.2%"}
 """
 
 SPLIT_PROMPT = """Из фразы пользователя извлеки список отдельных продуктов или блюд.
@@ -92,19 +100,24 @@ async def parse_food(user_text: str):
             "total": {"kcal", "protein", "fat", "carbs"},
         }
     """
-    # Step 1: Ask Claude to extract search query + weight
+    # Step 1: Ask Claude to extract search queries + weight
     if config.FATSECRET_CLIENT_ID:
         extracted = await _extract_query(user_text)
         if extracted:
-            query = extracted.get("query", "")
-            weight_g = float(extracted.get("weight_g", 100))
-            food_name_ru = extracted.get("food_name_ru", "")
+            query_en     = extracted.get("query", "")
+            query_ru     = extracted.get("food_name_ru", "")
+            weight_g     = float(extracted.get("weight_g", 100))
+            food_name_ru = query_ru
 
-            # Step 2: Search FatSecret
-            results = await fatsecret.search_food(query, max_results=1)
+            # Step 2: Search FatSecret — русское название первым, английское fallback
+            results = []
+            if query_ru:
+                results = await fatsecret.search_food(query_ru, max_results=3)
+            if not results and query_en:
+                results = await fatsecret.search_food(query_en, max_results=3)
+
             if results:
                 best = results[0]
-                # best["kcal"] etc. are per-100g values from description
                 per100_kcal    = best["kcal"]
                 per100_protein = best["protein"]
                 per100_fat     = best["fat"]
