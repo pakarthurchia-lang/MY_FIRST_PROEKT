@@ -502,9 +502,10 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
     user_id    = callback.from_user.id
     today      = date.today().isoformat()
     meal_label = MEAL_TYPES.get(meal_type, meal_type)
+    goals      = await database.get_user_goals(user_id)
+    prev_totals = await database.get_day_totals(user_id, today)
 
     if pending["type"] == "add_multi":
-        # Save all foods in parallel
         await asyncio.gather(*[
             database.add_entry(
                 user_id=user_id, entry_date=today, meal_type=meal_type,
@@ -515,7 +516,6 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
             for f in pending["foods"]
         ])
         totals = await database.get_day_totals(user_id, today)
-        goals  = await database.get_user_goals(user_id)
         names  = ", ".join(f["food_name"] for f in pending["foods"])
         await callback.message.edit_text(
             f"Добавлено в <b>{meal_label}</b>: {names}"
@@ -531,13 +531,51 @@ async def cb_meal_type(callback: CallbackQuery) -> None:
             fat=data["total"]["fat"], carbs=data["total"]["carbs"],
         )
         totals = await database.get_day_totals(user_id, today)
-        goals  = await database.get_user_goals(user_id)
         await callback.message.edit_text(
             f"Добавлено в <b>{meal_label}</b>: {data['food_name']} {data['weight_g']} г"
             + _format_totals(totals, goals),
             parse_mode="HTML",
         )
     await callback.answer("Записано!")
+
+    # Проверяем пересечение 50% порога — отправляем подсказку только один раз
+    half = goals["goal_kcal"] * 0.5
+    if prev_totals["kcal"] < half <= totals["kcal"]:
+        tip = await _halfway_tip(totals, goals)
+        if tip:
+            await callback.message.answer(f"🍽 <b>Половина нормы достигнута!</b>\n\n{tip}", parse_mode="HTML")
+
+
+# ── Halfway tip ───────────────────────────────────────────────────────────────
+
+async def _halfway_tip(totals: dict, goals: dict) -> str | None:
+    """Generate a short food recommendation for remaining macros via Claude Haiku."""
+    remaining = {
+        "kcal":    round(goals["goal_kcal"]    - totals["kcal"]),
+        "protein": round(goals["goal_protein"] - totals["protein"]),
+        "fat":     round(goals["goal_fat"]     - totals["fat"]),
+        "carbs":   round(goals["goal_carbs"]   - totals["carbs"]),
+    }
+    if remaining["kcal"] <= 0:
+        return None
+
+    from anthropic import AsyncAnthropic
+    import config as _config
+    client = AsyncAnthropic(api_key=_config.ANTHROPIC_API_KEY)
+    try:
+        resp = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content":
+                f"Осталось на день: {remaining['kcal']} ккал, "
+                f"белки {remaining['protein']}г, жиры {remaining['fat']}г, углеводы {remaining['carbs']}г.\n"
+                "Предложи 2-3 конкретных блюда на оставшиеся приёмы пищи чтобы закрыть норму. "
+                "Отвечай кратко, по-русски, без вступлений."
+            }],
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        return None
 
 
 # ── Barcode (photo) handler ────────────────────────────────────────────────────
