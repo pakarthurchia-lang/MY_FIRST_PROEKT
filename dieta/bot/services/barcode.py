@@ -1,26 +1,45 @@
 from __future__ import annotations
 """
-Decode a barcode from image bytes using zxingcpp.
-zxingcpp bundles the C++ library inside the Python wheel —
-no system package required.
+Decode a barcode from image bytes using pyzbar + libzbar0.
+libzbar is pre-loaded via ctypes with explicit paths so pyzbar
+can find it even when the dynamic linker cache is stale.
 """
+import ctypes
 import io
+
+_LIBZBAR_PATHS = [
+    "libzbar.so.0",
+    "/usr/lib/x86_64-linux-gnu/libzbar.so.0",
+    "/usr/lib/aarch64-linux-gnu/libzbar.so.0",
+    "/usr/lib/libzbar.so.0",
+    "/usr/local/lib/libzbar.so.0",
+]
+
+def _preload_libzbar() -> bool:
+    for path in _LIBZBAR_PATHS:
+        try:
+            ctypes.cdll.LoadLibrary(path)
+            return True
+        except OSError:
+            continue
+    return False
+
+_libzbar_loaded = _preload_libzbar()
 
 
 def decode_barcode(image_bytes: bytes) -> str | None:
     """Return the first barcode value from image bytes, or None."""
     try:
-        import zxingcpp
         from PIL import Image, ImageEnhance, ImageFilter
-    except ImportError:
+        from pyzbar.pyzbar import decode
+    except (ImportError, OSError):
         return None
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
     for candidate in _make_candidates(img, ImageEnhance, ImageFilter):
-        results = zxingcpp.read_barcodes(candidate)
-        if results:
-            return results[0].text
+        codes = decode(candidate)
+        if codes:
+            return codes[0].data.decode("utf-8")
     return None
 
 
@@ -41,7 +60,7 @@ def _make_candidates(img, ImageEnhance, ImageFilter):
 
 def is_available() -> bool:
     try:
-        import zxingcpp  # noqa: F401
+        from pyzbar.pyzbar import decode  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, OSError):
         return False
