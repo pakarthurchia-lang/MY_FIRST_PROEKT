@@ -1,66 +1,53 @@
 from __future__ import annotations
 """
-Decode a barcode from image bytes using pyzbar + libzbar0.
-libzbar is pre-loaded via ctypes with explicit paths so pyzbar
-can find it even when the dynamic linker cache is stale.
+Identify a food product from a photo using Claude Vision (Haiku).
+Works with packaging photos, labels, barcodes, or the food itself.
 """
-import ctypes
+import base64
+import json
+import re
 import io
 
-_LIBZBAR_PATHS = [
-    "libzbar.so.0",
-    "/usr/lib/x86_64-linux-gnu/libzbar.so.0",
-    "/usr/lib/aarch64-linux-gnu/libzbar.so.0",
-    "/usr/lib/libzbar.so.0",
-    "/usr/local/lib/libzbar.so.0",
-]
+import config
+from anthropic import AsyncAnthropic
 
-def _preload_libzbar() -> bool:
-    for path in _LIBZBAR_PATHS:
-        try:
-            ctypes.cdll.LoadLibrary(path)
-            return True
-        except OSError:
-            continue
-    return False
+_client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
 
-_libzbar_loaded = _preload_libzbar()
+_PROMPT = (
+    "Определи продукт питания на фото (упаковка, этикетка, штрихкод или сама еда). "
+    "Верни ТОЛЬКО JSON без markdown:\n"
+    '{"food_name": "точное название по-русски с брендом и характеристиками (жирность, вкус и т.д.)"}\n'
+    'Если на фото нет еды — верни {"food_name": null}'
+)
 
 
-def decode_barcode(image_bytes: bytes) -> str | None:
-    """Return the first barcode value from image bytes, or None."""
+async def identify_food(image_bytes: bytes) -> str | None:
+    """Return Russian product name from photo, or None if not food."""
+    image_b64 = base64.standard_b64encode(image_bytes).decode()
+
+    response = await _client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=128,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": image_b64,
+                    },
+                },
+                {"type": "text", "text": _PROMPT},
+            ],
+        }],
+    )
+
+    raw = response.content[0].text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
     try:
-        from PIL import Image, ImageEnhance, ImageFilter
-        from pyzbar.pyzbar import decode
-    except (ImportError, OSError):
+        return json.loads(raw).get("food_name")
+    except (json.JSONDecodeError, AttributeError):
         return None
-
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    for candidate in _make_candidates(img, ImageEnhance, ImageFilter):
-        codes = decode(candidate)
-        if codes:
-            return codes[0].data.decode("utf-8")
-    return None
-
-
-def _make_candidates(img, ImageEnhance, ImageFilter):
-    gray = img.convert("L")
-    yield gray
-    yield ImageEnhance.Contrast(gray).enhance(2.0)
-    yield gray.filter(ImageFilter.SHARPEN)
-
-    w, h = img.size
-    for target_w in (800, 1200, 600):
-        if abs(w - target_w) > 200:
-            scale = target_w / w
-            resized = gray.resize((target_w, int(h * scale)))
-            yield resized
-            yield ImageEnhance.Contrast(resized).enhance(2.0)
-
-
-def is_available() -> bool:
-    try:
-        from pyzbar.pyzbar import decode  # noqa: F401
-        return True
-    except (ImportError, OSError):
-        return False

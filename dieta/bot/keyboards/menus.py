@@ -89,22 +89,6 @@ def settings_kb() -> InlineKeyboardMarkup:
     )
 
 
-def barcode_kb(serving_g: float | None) -> InlineKeyboardMarkup:
-    """Shown after barcode product found — quick-confirm producer serving or enter custom weight."""
-    buttons = []
-    if serving_g:
-        buttons.append(
-            InlineKeyboardButton(
-                text=f"✓ {serving_g:.0f}г (порция)",
-                callback_data=f"barcode_serving:{serving_g:.0f}",
-            )
-        )
-    buttons.append(
-        InlineKeyboardButton(text="✏️ Другой вес", callback_data="barcode_custom_weight")
-    )
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-
 def cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
