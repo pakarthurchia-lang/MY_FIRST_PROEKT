@@ -4,5 +4,5 @@ groq==0.22.0
 aiosqlite==0.21.0
 python-dotenv==1.1.0
 aiofiles==24.1.0
-zxingcpp==2.2.0
+zxingcpp
 Pillow==10.4.0
