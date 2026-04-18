@@ -109,23 +109,42 @@ async def get_food_by_id(food_id: str) -> dict | None:
     if isinstance(servings, dict):
         servings = [servings]
 
-    # Find "100g" serving or first one
-    serving = next(
-        (s for s in servings if "100" in s.get("serving_description", "")),
-        servings[0] if servings else None,
-    )
-    if not serving:
+    if not servings:
         return None
 
+    # Prefer 100g serving for accurate normalization; fall back to first serving
+    base = next(
+        (s for s in servings if "100" in s.get("serving_description", "")),
+        servings[0],
+    )
+    # Producer's typical portion (first serving that is NOT the 100g reference)
+    producer = next(
+        (s for s in servings if s is not base and "100" not in s.get("serving_description", "")),
+        None,
+    )
+
     try:
+        base_weight = float(base.get("metric_serving_amount", 100)) or 100
+        factor = 100.0 / base_weight  # normalize everything to per-100g
+
+        producer_g: float | None = None
+        if producer:
+            try:
+                v = float(producer.get("metric_serving_amount", 0))
+                if v > 0:
+                    producer_g = v
+            except (ValueError, TypeError):
+                pass
+
         return {
             "food_name": food.get("food_name", ""),
-            "serving_description": serving.get("serving_description", ""),
-            "weight_g": float(serving.get("metric_serving_amount", 100)),
-            "kcal": float(serving.get("calories", 0)),
-            "protein": float(serving.get("protein", 0)),
-            "fat": float(serving.get("fat", 0)),
-            "carbs": float(serving.get("carbohydrate", 0)),
+            "serving_description": base.get("serving_description", ""),
+            "producer_serving_g": producer_g,
+            "weight_g": 100,
+            "kcal":    round(float(base.get("calories", 0))      * factor, 1),
+            "protein": round(float(base.get("protein", 0))       * factor, 1),
+            "fat":     round(float(base.get("fat", 0))           * factor, 1),
+            "carbs":   round(float(base.get("carbohydrate", 0))  * factor, 1),
         }
     except (ValueError, TypeError):
         return None

@@ -30,7 +30,7 @@ from bot.services import stt, nutrition
 from bot.services.intent import detect_intent, format_diary_readable
 from bot.services import barcode as barcode_svc
 from bot.services import fatsecret
-from bot.keyboards.menus import confirm_food_kb, meal_type_kb, MEAL_TYPES
+from bot.keyboards.menus import confirm_food_kb, meal_type_kb, barcode_kb, MEAL_TYPES
 from db import database
 
 router = Router()
@@ -40,6 +40,7 @@ _pending: dict[str, dict] = {}
 
 class BarcodeForm(StatesGroup):
     weight = State()
+    name   = State()  # fallback: barcode not in FatSecret index, ask product name
 
 MEAL_ICONS = {
     "breakfast": "Завтрак",
@@ -609,22 +610,31 @@ async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) ->
 
     nutrition_data = await fatsecret.find_by_barcode(barcode)
     if not nutrition_data:
+        await state.set_state(BarcodeForm.name)
         await status.edit_text(
-            f"Штрихкод <code>{barcode}</code> не найден в базе FatSecret.\n"
-            "Попробуй добавить продукт голосом или текстом.",
+            f"Штрихкод <code>{barcode}</code> не найден в индексе FatSecret.\n\n"
+            "Введи название продукта — найду его по имени:",
             parse_mode="HTML",
         )
         return
 
     await state.set_state(BarcodeForm.weight)
     await state.update_data(nutrition=nutrition_data)
+
+    serving_g = nutrition_data.get("producer_serving_g")
+    hint = (
+        f"\n\nПорция производителя: <b>{serving_g:.0f}г</b> — нажми кнопку или введи свой вес."
+        if serving_g
+        else "\n\nСколько граммов ты съел? (напиши или скажи голосом)"
+    )
     await status.edit_text(
         f"<b>{nutrition_data['food_name']}</b>\n"
-        f"(на 100г: {nutrition_data['kcal']:.0f} ккал, "
+        f"на 100г: {nutrition_data['kcal']:.0f} ккал, "
         f"Б {nutrition_data['protein']:.1f}г, "
         f"Ж {nutrition_data['fat']:.1f}г, "
-        f"У {nutrition_data['carbs']:.1f}г)\n\n"
-        "Сколько граммов ты съел? (напиши или скажи голосом)",
+        f"У {nutrition_data['carbs']:.1f}г"
+        + hint,
+        reply_markup=barcode_kb(serving_g),
         parse_mode="HTML",
     )
 
@@ -639,11 +649,16 @@ def _extract_weight(text: str) -> float | None:
     return None
 
 
-async def _save_barcode_entry(weight_g: float, message: Message, state: FSMContext) -> None:
+async def _save_barcode_entry(
+    weight_g: float, message: Message, state: FSMContext, user_id: int | None = None
+) -> None:
     fsm_data = await state.get_data()
+    raw = fsm_data.get("nutrition")
+    if not raw:
+        return  # state already cleared (double-tap guard)
     await state.clear()
 
-    raw   = fsm_data["nutrition"]
+    uid   = user_id if user_id is not None else message.from_user.id
     ratio = weight_g / 100.0
     data  = {
         "food_name": raw["food_name"],
@@ -656,8 +671,8 @@ async def _save_barcode_entry(weight_g: float, message: Message, state: FSMConte
             "carbs":   round(raw["carbs"]   * ratio, 1),
         },
     }
-    key = _make_key(data, message.from_user.id)
-    _pending[key] = {"type": "add", "data": data, "user_id": message.from_user.id}
+    key = _make_key(data, uid)
+    _pending[key] = {"type": "add", "data": data, "user_id": uid}
 
     await message.answer(
         f"{_format_nutrition_card(data)}\n\nДобавить в дневник?",
@@ -698,3 +713,88 @@ async def handle_barcode_weight_voice(message: Message, bot: Bot, state: FSMCont
 
     await status.delete()
     await _save_barcode_entry(weight_g, message, state)
+
+
+@router.message(BarcodeForm.name, F.text)
+async def handle_barcode_name_text(message: Message, state: FSMContext) -> None:
+    await _barcode_name_search(message.text.strip(), message, state)
+
+
+@router.message(BarcodeForm.name, F.voice)
+async def handle_barcode_name_voice(message: Message, bot: Bot, state: FSMContext) -> None:
+    status = await message.answer("Распознаю голос...")
+    voice_file = await bot.get_file(message.voice.file_id)
+    buf = io.BytesIO()
+    await bot.download_file(voice_file.file_path, destination=buf)
+    try:
+        text = await stt.transcribe(buf.getvalue())
+    except Exception as e:
+        await status.edit_text(f"Не удалось распознать голос: {e}")
+        return
+    await status.delete()
+    await _barcode_name_search(text.strip(), message, state)
+
+
+async def _barcode_name_search(name: str, message: Message, state: FSMContext) -> None:
+    """Search FatSecret by product name after barcode lookup failed."""
+    status = await message.answer(f"Ищу «{name}» в FatSecret...")
+    results = await fatsecret.search_food(name, max_results=3)
+    if not results:
+        await status.edit_text(
+            f"Не нашёл «{name}» в FatSecret.\n"
+            "Попробуй уточнить название или добавь продукт голосовым сообщением."
+        )
+        await state.clear()
+        return
+
+    best = results[0]
+    nutrition_data = {
+        "food_name": name,  # keep user's name (may include brand/detail)
+        "producer_serving_g": None,
+        "weight_g": 100,
+        "kcal":    round(best["kcal"], 1),
+        "protein": round(best["protein"], 1),
+        "fat":     round(best["fat"], 1),
+        "carbs":   round(best["carbs"], 1),
+    }
+    await state.set_state(BarcodeForm.weight)
+    await state.update_data(nutrition=nutrition_data)
+    await status.edit_text(
+        f"<b>{best['food_name']}</b>\n"
+        f"на 100г: {nutrition_data['kcal']:.0f} ккал, "
+        f"Б {nutrition_data['protein']:.1f}г, "
+        f"Ж {nutrition_data['fat']:.1f}г, "
+        f"У {nutrition_data['carbs']:.1f}г\n\n"
+        "Сколько граммов ты съел? (напиши или скажи голосом)",
+        reply_markup=barcode_kb(None),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("barcode_serving:"))
+async def cb_barcode_serving(callback: CallbackQuery, state: FSMContext) -> None:
+    """User tapped '✓ Xг (порция)' — use producer's serving weight directly."""
+    await callback.answer()
+    try:
+        serving_g = float(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await _save_barcode_entry(serving_g, callback.message, state, user_id=callback.from_user.id)
+
+
+@router.callback_query(F.data == "barcode_custom_weight")
+async def cb_barcode_custom_weight(callback: CallbackQuery, state: FSMContext) -> None:
+    """User tapped '✏️ Другой вес' — remove buttons and wait for text/voice input."""
+    await callback.answer()
+    fsm_data = await state.get_data()
+    raw = fsm_data.get("nutrition", {})
+    await callback.message.edit_text(
+        f"<b>{raw.get('food_name', '')}</b>\n"
+        f"на 100г: {raw.get('kcal', 0):.0f} ккал, "
+        f"Б {raw.get('protein', 0):.1f}г, "
+        f"Ж {raw.get('fat', 0):.1f}г, "
+        f"У {raw.get('carbs', 0):.1f}г\n\n"
+        "Сколько граммов ты съел? (напиши или скажи голосом)",
+        parse_mode="HTML",
+    )
