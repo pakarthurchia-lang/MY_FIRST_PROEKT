@@ -598,19 +598,12 @@ async def handle_photo_barcode(message: Message, bot: Bot, state: FSMContext) ->
     buf   = io.BytesIO()
     await bot.download_file(file.file_path, destination=buf)
 
-    if not barcode_svc.is_available():
-        await status.edit_text(
-            "Сканер штрихкодов недоступен на сервере.\n"
-            "Добавь продукт голосом или текстом."
-        )
-        return
-
     barcode = barcode_svc.decode_barcode(buf.getvalue())
     if not barcode:
         await state.set_state(BarcodeForm.name)
         await status.edit_text(
-            "Не удалось прочитать штрихкод с фото.\n\n"
-            "Введи название продукта — найду по имени:",
+            "Штрихкод не распознан.\n\n"
+            "Введи название продукта — найду по имени:"
         )
         return
 
