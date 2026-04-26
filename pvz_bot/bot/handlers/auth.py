@@ -339,59 +339,32 @@ async def handle_wb_phone(message: Message, state: FSMContext):
 
 
 async def _start_wb_web_login(message: Message, state: FSMContext, phone: str):
-    """Логин в WB ПВЗ кабинет через Chrome headless (pvz-lk.wb.ru)."""
-    from wildberries.mobile_login import _normalize_phone
+    """Логин в WB через мобильный API (r-point.wb.ru) — SMS без браузера."""
+    from wildberries.mobile_login import _normalize_phone, send_sms
     phone_norm = _normalize_phone(phone)
 
     await message.answer(
-        f"⏳ Открываю WB ПВЗ кабинет для <b>+{phone_norm}</b>...\n(Chrome headless)",
+        f"⏳ Отправляю SMS для WB на <b>+{phone_norm}</b>...",
         parse_mode="HTML",
     )
 
     try:
-        from wildberries.web_login import login_wb_web
-        import wildberries.web_login as _wb_web
-    except ImportError as e:
-        await state.clear()
-        await message.answer(
-            f"❌ <b>Chrome не настроен:</b>\n<code>{e}</code>\n\n"
-            f"Установи: pip install undetected-chromedriver",
-            parse_mode="HTML",
-        )
-        return
-
-    await state.set_state(WbLoginState.waiting_code)
-    _wb_web._get_pending_code_sync_override = _get_wb_pending_code_sync
-
-    async def get_code():
-        await message.answer(
-            "📨 <b>WB отправил SMS</b>\n\nВведи код из SMS:",
-            parse_mode="HTML",
-        )
-
-    async def on_status(msg: str):
-        try:
-            await message.answer(f"🔄 {msg}")
-        except Exception:
-            pass
-
-    try:
-        token_data = await login_wb_web(phone=phone_norm, get_code=get_code, on_status=on_status)
-    except RuntimeError as e:
-        await state.clear()
-        await message.answer(
-            f"❌ <b>Ошибка логина WB:</b>\n\n<code>{html.escape(str(e))}</code>\n\n"
-            f"Попробуй /wb_login снова.",
-            parse_mode="HTML",
-        )
-        return
+        session_token = await send_sms(phone_norm)
     except Exception as e:
         await state.clear()
         await message.answer(
-            f"❌ <b>Неожиданная ошибка:</b>\n\n<code>{html.escape(f'{type(e).__name__}: {e}')}</code>",
+            f"❌ <b>Ошибка отправки SMS:</b>\n<code>{html.escape(str(e))}</code>",
             parse_mode="HTML",
         )
         return
+
+    await state.update_data(wb_session_token=session_token)
+    await state.set_state(WbLoginState.waiting_code)
+    await message.answer(
+        "📨 <b>WB отправил SMS</b>\n\nВведи код из SMS:",
+        parse_mode="HTML",
+    )
+    return
 
     await state.clear()
 
@@ -419,13 +392,53 @@ async def _start_wb_web_login(message: Message, state: FSMContext, phone: str):
 
 @router.message(WbLoginState.waiting_code)
 async def handle_wb_code(message: Message, state: FSMContext):
-    """Передаёт SMS код в ожидающий Chrome поток."""
+    """Принимает SMS код и верифицирует через мобильный API."""
     if message.from_user.id != OWNER_CHAT_ID:
         return
     if not message.text:
         return
-    _set_wb_pending_code(message.text.strip())
-    await message.answer("⏳ Ввожу код...")
+
+    code = message.text.strip()
+    data = await state.get_data()
+    session_token = data.get("wb_session_token")
+
+    if not session_token:
+        await message.answer("❌ Сессия устарела, начни заново: /wb_login")
+        await state.clear()
+        return
+
+    await message.answer("⏳ Проверяю код...")
+    await state.clear()
+
+    try:
+        from wildberries.mobile_login import verify_code
+        token_data = await verify_code(session_token, code)
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>Ошибка WB авторизации:</b>\n<code>{html.escape(str(e))}</code>\n\nПопробуй /wb_login снова.",
+            parse_mode="HTML",
+        )
+        return
+
+    from wildberries import http_client as wb_http
+    wb_http._token_cache.clear()
+
+    import time as _time
+    exp = token_data.get("exp", 0)
+    remaining_h = max(0, int((exp - _time.time()) / 3600))
+    pid = token_data.get("pickpoint_id")
+    ttype = token_data.get("token_type", "mobile")
+    has_refresh = bool(token_data.get("refresh_token"))
+    pvz_line = f"ПВЗ ID: <b>{pid}</b> ✅" if pid else "⚠️ ПВЗ ID не определён"
+
+    await message.answer(
+        f"✅ <b>WB авторизация успешна!</b>\n\n"
+        f"{pvz_line}\n"
+        f"Тип токена: <b>{'Mobile PVZ' if ttype == 'mobile' else 'Web'}</b>\n"
+        f"Токен действует: <b>~{remaining_h}ч</b>\n"
+        f"{'♻️ Refresh token получен!' if has_refresh else '⚠️ Refresh token не получен'}",
+        parse_mode="HTML",
+    )
 
 
 # ── /wb_debug — диагностика validate endpoint ────────────────────────────────

@@ -120,12 +120,18 @@ async def verify_code(session_token: str, sms_code: str) -> dict:
         token_data["refresh_token"] = refresh_token
         token_data["refresh_exp"] = _jwt_exp(refresh_token) or int(time.time()) + 90 * 86400
 
-    # Если токен без привязки к ПВЗ (xpid=0) — пробуем апгрейд через refresh
-    if not pickpoint_id and refresh_token:
-        pvz_token = await _try_select_pvz(access_token, refresh_token)
+    # Если токен без привязки к ПВЗ (xpid=0) — апгрейд через switch endpoint
+    if not pickpoint_id:
+        pvz_token = await _switch_to_pvz_token(access_token, refresh_token or "")
         if pvz_token:
             _save_token(pvz_token)
             return pvz_token
+        # Fallback: старый механизм через /api/v1/refresh
+        if refresh_token:
+            pvz_token = await _try_select_pvz(access_token, refresh_token)
+            if pvz_token:
+                _save_token(pvz_token)
+                return pvz_token
 
     _save_token(token_data)
     return token_data
@@ -181,6 +187,96 @@ async def _try_select_pvz(general_token: str, refresh_token: str) -> Optional[di
         "refresh_token": new_refresh or refresh_token,
         "refresh_exp": (_jwt_exp(new_refresh) if new_refresh else 0) or int(time.time()) + 90 * 86400,
     }
+
+
+def _load_saved_pid() -> Optional[int]:
+    """Читает internal pid из token файла (если ранее сохранён)."""
+    try:
+        with open(TOKEN_FILE) as f:
+            data = json.load(f)
+        return int(data["internal_pid"]) if data.get("internal_pid") else None
+    except Exception:
+        return None
+
+
+async def _switch_to_pvz_token(general_token: str, refresh_token: str) -> Optional[dict]:
+    """
+    Апгрейд общего токена (xpid=0) до PVZ-scoped через switch endpoint.
+
+    1. Берём internal pid из конфига / сохранённого файла / api-discovery (fallback)
+    2. GET s-point.wb.ru/s{N}/api/v2/pickpoint/{pid}/switch → PVZ JWT (xpid≠0)
+    """
+    from config import WB_PVZ_PID
+    headers = {**MOBILE_HEADERS, "x-token": general_token}
+
+    # Шаг 1: получаем internal pickpoint id (быстрые источники сначала)
+    pid: Optional[int] = WB_PVZ_PID or _load_saved_pid()
+
+    if not pid:
+        # Последний шанс: api-discovery (может таймаутить)
+        discovery_url = "https://api-discovery.wb.ru/api/v2/pickpoint/list"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                async with session.get(discovery_url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        items = data if isinstance(data, list) else data.get("data", [data])
+                        if not isinstance(items, list):
+                            items = [items]
+                        for item in items:
+                            found = item.get("id") or item.get("pickpointId")
+                            if found:
+                                pid = int(found)
+                                print(f"✅ WB discovery: internal pid={pid}")
+                                break
+                    else:
+                        text = await resp.text()
+                        print(f"⚠️ WB discovery {resp.status}: {text[:200]}")
+        except Exception as e:
+            print(f"⚠️ WB discovery error: {e}")
+
+    if not pid:
+        print("⚠️ WB switch: internal pid не найден — задай WB_PVZ_PID в .env")
+        return None
+
+    # Шаг 2: switch → PVZ-scoped токен
+    for shard in range(1, 5):
+        switch_url = f"https://s-point.wb.ru/s{shard}/api/v2/pickpoint/{pid}/switch"
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+                async with session.get(switch_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        continue
+                    result = await resp.json()
+                    new_access = (result.get("access") or {}).get("token") or result.get("token")
+                    if not new_access:
+                        continue
+                    claims = _jwt_decode(new_access)
+                    xpid = claims.get("xpid")
+                    pvz_pid = claims.get("pid")
+                    if not xpid:
+                        print(f"⚠️ WB switch s{shard}: xpid=0 в JWT, пропускаем")
+                        continue
+                    print(f"✅ WB switch s{shard}: pid={pvz_pid}, xpid={xpid}")
+                    new_refresh = (result.get("refresh") or {}).get("token")
+                    return {
+                        "x_token": new_access,
+                        "exp": _jwt_exp(new_access) or int(time.time()) + 86400,
+                        "pickpoint_id": xpid,
+                        "internal_pid": pid,
+                        "token_type": "mobile",
+                        "refresh_token": new_refresh or refresh_token,
+                        "refresh_exp": (
+                            (_jwt_exp(new_refresh) if new_refresh else 0)
+                            or int(time.time()) + 90 * 86400
+                        ),
+                    }
+        except Exception as e:
+            print(f"⚠️ WB switch s{shard} error: {e}")
+            continue
+
+    print("⚠️ WB switch: все шарды не вернули PVZ-токен")
+    return None
 
 
 async def _discover_xpid(token: str) -> Optional[int]:

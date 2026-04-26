@@ -7,7 +7,7 @@ from aiogram.types import (
     FSInputFile,
 )
 from config import OWNER_CHAT_ID
-from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports
+from ozon.scraper import scrape_claims, get_monthly_stats, get_available_reports, scrape_archive_claims
 from yandex.reports import available_months_for_menu as ym_available_months
 from ozon.analytics import get_all_pvz_analytics
 from bot.handlers.claims import format_claim
@@ -71,13 +71,29 @@ async def cb_claims(call: CallbackQuery):
         return
     await call.answer()
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔵 Ozon",           callback_data="claims:ozon")],
-        [InlineKeyboardButton(text="🟣 Wildberries",    callback_data="claims:wb")],
+        [InlineKeyboardButton(text="🔵 Ozon",            callback_data="claims:ozon_menu")],
+        [InlineKeyboardButton(text="🟣 Wildberries",     callback_data="claims:wb")],
         [InlineKeyboardButton(text="🟡 Яндекс Маркет",  callback_data="claims:ym")],
-        [InlineKeyboardButton(text="◀️ Назад",          callback_data="menu:back")],
+        [InlineKeyboardButton(text="◀️ Назад",           callback_data="menu:back")],
     ])
     await call.message.answer(
         "📋 <b>Претензии и штрафы</b>\n\nВыбери платформу:",
+        parse_mode="HTML", reply_markup=markup,
+    )
+
+
+@router.callback_query(F.data == "claims:ozon_menu")
+async def cb_claims_ozon_menu(call: CallbackQuery):
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔵 Активные претензии",   callback_data="claims:ozon")],
+        [InlineKeyboardButton(text="💸 Архив (списания)",     callback_data="claims:ozon_archive")],
+        [InlineKeyboardButton(text="◀️ Назад",                callback_data="menu:claims")],
+    ])
+    await call.message.answer(
+        "🔵 <b>Претензии Ozon</b>\n\nВыбери раздел:",
         parse_mode="HTML", reply_markup=markup,
     )
 
@@ -120,6 +136,126 @@ async def cb_claims_ozon(call: CallbackQuery):
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     await call.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data == "claims:ozon_archive")
+async def cb_claims_ozon_archive(call: CallbackQuery):
+    """Показывает выбор месяца для архива претензий Ozon."""
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+
+    from datetime import date
+    today = date.today()
+
+    buttons = []
+    row = []
+    for i in range(12):
+        # идём назад от прошлого месяца
+        month = (today.month - 1 - i - 1) % 12 + 1
+        year  = today.year + ((today.month - 1 - i - 1) // 12)
+        label = f"{MONTHS_RU[month][:3]} {year}"
+        row.append(InlineKeyboardButton(
+            text=label,
+            callback_data=f"ozon_arch:{month}:{year}",
+        ))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="claims:ozon_menu")])
+
+    await call.message.answer(
+        "💸 <b>Архив претензий Ozon (списания)</b>\n\nВыбери месяц:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^ozon_arch:\d+:\d+$"))
+async def cb_ozon_archive_month(call: CallbackQuery):
+    """Загружает и показывает архивные претензии за выбранный месяц."""
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+
+    _, month_str, year_str = call.data.split(":")
+    month, year = int(month_str), int(year_str)
+
+    await call.message.answer(
+        f"⏳ Загружаю архив претензий Ozon за {MONTHS_RU[month]} {year}..."
+    )
+
+    try:
+        claims = await scrape_archive_claims(month, year)
+    except Exception as e:
+        await call.message.answer(f"❌ Ошибка: {e}")
+        return
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К выбору месяца", callback_data="claims:ozon_archive")],
+        [InlineKeyboardButton(text="🏠 Меню",            callback_data="menu:back")],
+    ])
+
+    _CLAIM_EMOJI = {
+        "Штраф":          "⚠️",
+        "Возврат агента":  "🔄",
+        "Утеря":           "📦",
+        "Повреждение":     "🔨",
+        "Недостача":       "📉",
+        "Претензия":       "📋",
+    }
+    _MONTHS_SHORT = ["", "янв", "фев", "мар", "апр", "май", "июн",
+                     "июл", "авг", "сен", "окт", "ноя", "дек"]
+
+    def _short_date(d: str) -> str:
+        parts = d.split("-")
+        if len(parts) == 3:
+            return f"{int(parts[2])} {_MONTHS_SHORT[int(parts[1])]}"
+        return d
+
+    if not claims:
+        await call.message.answer(
+            f"📭 Архивных претензий за {MONTHS_RU[month]} {year} нет\n"
+            f"(статусы: Оплачена / Удержано из АВ)",
+            reply_markup=back_kb,
+        )
+        return
+
+    from collections import defaultdict
+    by_pvz: dict = defaultdict(list)
+    for c in claims:
+        by_pvz[c["pvz"]].append(c)
+
+    total_all = sum(c["amount"] for c in claims)
+    text = (
+        f"💸 <b>Архив Ozon — {MONTHS_RU[month]} {year}</b>\n"
+        f"📊 {len(claims)} претензий · <b>{total_all:,.0f} ₽</b>\n"
+    )
+
+    for pvz_name, pvz_claims in sorted(by_pvz.items()):
+        pvz_total = sum(c["amount"] for c in pvz_claims)
+        text += f"\n\n🏪 <b>{pvz_name}</b> · {pvz_total:,.0f} ₽\n"
+
+        # Группируем по типу, сортируем по сумме убыванию
+        by_type: dict = defaultdict(list)
+        for c in pvz_claims:
+            by_type[c["claim_type"]].append(c)
+
+        for claim_type, type_claims in sorted(
+            by_type.items(), key=lambda x: -sum(c["amount"] for c in x[1])
+        ):
+            type_total = sum(c["amount"] for c in type_claims)
+            emoji = _CLAIM_EMOJI.get(claim_type, "•")
+            text += (
+                f"{emoji} {claim_type} ({len(type_claims)}): "
+                f"<b>{type_total:,.0f} ₽</b>\n"
+            )
+            for c in sorted(type_claims, key=lambda x: -x["amount"]):
+                text += f"   {_short_date(c['date_issued'])} · {c['amount']:,.0f} ₽\n"
+
+    await call.message.answer(text, parse_mode="HTML", reply_markup=back_kb)
 
 
 @router.callback_query(F.data == "claims:wb")
@@ -415,6 +551,12 @@ async def cb_profit_result(call: CallbackQuery):
         # PDF не распарсился — показываем общую сумму
         total_profit = stats["profit"]
         total_tax_shortfall = round(stats["fines_total"] * stats["tax_rate"], 2)
+        if pvz_revenue.get("_error"):
+            err = pvz_revenue["_error"]
+            if "403" in err:
+                pvz_lines = "\n⚠️ <i>Разбивка по ПВЗ недоступна — нужен Web-токен. Запусти /login.</i>"
+            else:
+                pvz_lines = f"\n⚠️ <i>PDF не распарсился: {err[:120]}</i>"
 
     shortfall_total_str = (
         f"\n💡 Итого докинуть в копилку налога: <b>+{total_tax_shortfall:,.2f} руб.</b>"

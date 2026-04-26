@@ -419,25 +419,44 @@ async def _force_renew() -> str:
     return _token_data["access_token"]
 
 
+def _handle_curl_error(e: Exception) -> RuntimeError:
+    msg = str(e)
+    if "28" in msg or "timed out" in msg.lower() or "timeout" in msg.lower():
+        return RuntimeError(
+            "Ozon не отвечает (timeout).\n"
+            "SSO куки скорее всего протухли — запусти /login для обновления."
+        )
+    return RuntimeError(f"Ozon: ошибка соединения — {msg[:200]}")
+
+
 async def post(url: str, body: dict) -> dict:
     token = await get_access_token()
     cookies = _get_cookies()
     headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
 
-    async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
-        r = await s.post(url, json=body, headers=headers, cookies=cookies)
-        if r.status_code != 401:
-            r.raise_for_status()
-            return r.json()
+    try:
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
+            r = await s.post(url, json=body, headers=headers, cookies=cookies)
+            if r.status_code != 401:
+                r.raise_for_status()
+                return r.json()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise _handle_curl_error(e) from e
 
-    # 401 — обновляем токен и повторяем
     token = await _force_renew()
     cookies = _get_cookies()
     headers["Authorization"] = f"Bearer {token}"
-    async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
-        r = await s.post(url, json=body, headers=headers, cookies=cookies)
-        r.raise_for_status()
-        return r.json()
+    try:
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
+            r = await s.post(url, json=body, headers=headers, cookies=cookies)
+            r.raise_for_status()
+            return r.json()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise _handle_curl_error(e) from e
 
 
 async def get(url: str, params: dict = None) -> dict:
@@ -445,20 +464,29 @@ async def get(url: str, params: dict = None) -> dict:
     cookies = _get_cookies()
     headers = {**HEADERS_BASE, "Authorization": f"Bearer {token}"}
 
-    async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
-        r = await s.get(url, params=params, headers=headers, cookies=cookies)
-        if r.status_code != 401:
-            r.raise_for_status()
-            return r.json()
+    try:
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
+            r = await s.get(url, params=params, headers=headers, cookies=cookies)
+            if r.status_code != 401:
+                r.raise_for_status()
+                return r.json()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise _handle_curl_error(e) from e
 
-    # 401 — обновляем токен и повторяем
     token = await _force_renew()
     cookies = _get_cookies()
     headers["Authorization"] = f"Bearer {token}"
-    async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
-        r = await s.get(url, params=params, headers=headers, cookies=cookies)
-        r.raise_for_status()
-        return r.json()
+    try:
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=_TIMEOUT) as s:
+            r = await s.get(url, params=params, headers=headers, cookies=cookies)
+            r.raise_for_status()
+            return r.json()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise _handle_curl_error(e) from e
 
 
 async def get_bytes(url: str) -> bytes:

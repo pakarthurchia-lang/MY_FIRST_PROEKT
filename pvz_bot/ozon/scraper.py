@@ -21,6 +21,9 @@ STATUS_RU = {
     "PaymentRequired": "Требует оплаты",
     "UnderReview": "На рассмотрении",
     "Closed": "Закрыта",
+    "Collected": "Удержано из АВ",
+    "Payed": "Оплачена",
+    "Declined": "Отклонена",
 }
 
 _pvz_cache: dict = {}
@@ -106,6 +109,50 @@ async def scrape_claims() -> list:
         }
         claims.append(claim)
         await upsert_claim(claim)
+
+    return claims
+
+
+async def scrape_archive_claims(month: int, year: int, store_ids: list = None) -> list:
+    """
+    Архивные претензии за месяц: статусы Collected (удержано из АВ) + Payed (оплачена).
+    store_ids — список int id ПВЗ, None = все.
+    """
+    import calendar
+    pvz_map = await _get_pvz_map()
+
+    last_day = calendar.monthrange(year, month)[1]
+    date_from = f"{year}-{month:02d}-01"
+    date_to   = f"{year}-{month:02d}-{last_day:02d}"
+
+    body = {
+        "claimStatuses": ["Collected", "Payed"],
+        "limit": 200,
+        "from": date_from,
+        "to":   date_to,
+        "requestTypes": [],
+        "pickPointIds": store_ids or [],
+    }
+
+    data = await post(CLAIMS_API, body)
+    raw_claims = data.get("claims", [])
+
+    claims = []
+    for c in raw_claims:
+        pick_id  = str(c.get("pickPointId", ""))
+        pvz_name = pvz_map.get(pick_id, pick_id)
+        status_en     = c.get("status", "")
+        claim_type_en = c.get("claimType", "")
+        claims.append({
+            "id":           str(c["claimId"]),
+            "pvz":          pvz_name,
+            "store_id":     pick_id,
+            "claim_type":   CLAIM_TYPE_RU.get(claim_type_en, claim_type_en),
+            "amount":       c.get("amount", {}).get("decimalValue", 0),
+            "date_issued":  (c.get("createdAt") or "")[:10],
+            "status":       STATUS_RU.get(status_en, status_en),
+            "status_en":    status_en,
+        })
 
     return claims
 

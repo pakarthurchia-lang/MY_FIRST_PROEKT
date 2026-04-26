@@ -214,8 +214,8 @@ def _chrome_login_sync(
 
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
-    # normal = ждём полной загрузки страницы включая JS — нужно для Nuxt SPA
-    options.page_load_strategy = "normal"
+    # eager = ждём только DOM, не все ресурсы → не зависнет на медленных шрифтах/картинках
+    options.page_load_strategy = "eager"
 
     driver = None
     try:
@@ -273,8 +273,11 @@ def _chrome_login_sync(
         # ВАЖНО: приложение само генерирует state/nonce и сохраняет в sessionStorage.
         # Если идти напрямую на id.ozon.ru — state не совпадёт при callback → обмен токена не работает.
         status("Открываю turbo-pvz.ozon.ru/login...")
-        driver.get("https://turbo-pvz.ozon.ru/login")
-        time.sleep(2)
+        try:
+            driver.get("https://turbo-pvz.ozon.ru/login")
+        except Exception:
+            pass  # eager: TimeoutException нормален
+        time.sleep(4)
 
         # Нажимаем кнопку "Войти через Ozon ID" — приложение само делает redirect на id.ozon.ru
         status("Нажимаю 'Войти через Ozon ID'...")

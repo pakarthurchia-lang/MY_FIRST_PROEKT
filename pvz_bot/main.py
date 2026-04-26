@@ -75,14 +75,14 @@ async def main():
     asyncio.ensure_future(refresh_all())
 
     try:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         await bot.send_message(
             OWNER_CHAT_ID,
-            "🟢 <b>ПВЗ бот запущен!</b>\n\n"
-            "/login — авторизация Ozon\n"
-            "/wb_login — авторизация Wildberries\n"
-            "/claims — претензии\n"
-            "/help — все команды",
-            parse_mode="HTML"
+            "🟢 <b>Бот запущен</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Старт", callback_data="menu:back")],
+            ]),
         )
     except Exception:
         logger.info("Не могу отправить стартовое сообщение — напиши боту /start в Telegram")
