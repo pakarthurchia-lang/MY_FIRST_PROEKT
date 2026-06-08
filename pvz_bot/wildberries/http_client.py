@@ -146,6 +146,30 @@ async def _refresh_wb_token() -> str:
     except (KeyError, TypeError) as e:
         raise RuntimeError(f"WB refresh: неожиданный формат ответа: {json.dumps(result)[:200]}") from e
 
+    import base64 as _b64, json as _json
+    def _claims(tok):
+        try:
+            p = tok.split(".")[1]; p += "=" * (4 - len(p) % 4)
+            return _json.loads(_b64.b64decode(p))
+        except Exception:
+            return {}
+
+    new_claims = _claims(new_access)
+    new_xpid = new_claims.get("xpid") or 0
+
+    # Если рефреш вернул xpid=0 — апгрейдим через switch
+    if not new_xpid:
+        try:
+            from wildberries.mobile_login import _switch_to_pvz_token
+            pvz = await _switch_to_pvz_token(new_access, new_refresh)
+            if pvz:
+                _save_token(pvz)
+                _token_cache = pvz
+                print("✅ WB токен обновлён через refresh + switch")
+                return pvz["x_token"]
+        except Exception as e:
+            print(f"⚠️ WB switch после refresh: {e}")
+
     updated = {
         **data,
         "x_token": new_access,

@@ -454,9 +454,12 @@ async def cb_profit_platform(call: CallbackQuery):
         elif platform == "wb":
             if not get_token_status()["valid"]:
                 await call.message.answer(
-                    "⚠️ WB токен не найден или истёк.\n"
-                    "Обнови: /wb_token eyJ...",
-                    reply_markup=_platform_keyboard(),
+                    "⚠️ <b>WB токен истёк</b>\n\nНужно войти заново:",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🔑 Войти в WB", callback_data="wb:login")],
+                        [InlineKeyboardButton(text="↩️ Назад",      callback_data="menu:profit")],
+                    ]),
                 )
                 return
             from wildberries.api import get_available_months as wb_get_months

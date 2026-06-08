@@ -214,14 +214,37 @@ def _chrome_login_sync(
 
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
-    # eager = ждём только DOM, не все ресурсы → не зависнет на медленных шрифтах/картинках
     options.page_load_strategy = "eager"
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+
+    import os as _os
+    _PROFILE_DIR = _os.path.abspath("data/chrome_profile_ozon")
+    _os.makedirs(_PROFILE_DIR, exist_ok=True)
 
     driver = None
     try:
-        driver = uc.Chrome(options=options, version_main=146)
-        driver.set_page_load_timeout(60)   # макс 60 сек на загрузку страницы
+        driver = uc.Chrome(options=options, version_main=148, user_data_dir=_PROFILE_DIR)
+        driver.set_page_load_timeout(60)
         driver.implicitly_wait(5)
+
+        # Инжектируем перехватчик fetch на все страницы (включая редиректы)
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": """
+            window._ozSpy = {calls: []};
+            var _origFetch = window.fetch;
+            window.fetch = function(input, init) {
+                var url = typeof input === 'string' ? input : (input && input.url ? input.url : String(input));
+                var entry = {url: url, method: (init&&init.method)||'GET', status: null, body: null};
+                window._ozSpy.calls.push(entry);
+                return _origFetch.call(window, input, init).then(function(r) {
+                    entry.status = r.status;
+                    r.clone().text().then(function(t) {
+                        entry.body = t.slice(0, 500);
+                    }).catch(function(){});
+                    return r;
+                });
+            };
+        """})
 
         # Внедряем перехватчик fetch+XHR ДО любой навигации — будет работать на всех страницах
         driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
@@ -666,8 +689,35 @@ def _chrome_login_sync(
             if "turbo-pvz.ozon.ru" in current_url and "/login" not in current_url and "?token=" not in current_url:
                 break
 
+            # На /login?token= — проверяем перехваченные fetch-вызовы на наличие access_token
+            if "turbo-pvz.ozon.ru/login" in current_url and "token=" in current_url and _ >= 3:
+                try:
+                    calls = driver.execute_script("return window._ozSpy ? window._ozSpy.calls : [];") or []
+                    for c in calls:
+                        body = c.get("body") or ""
+                        if "access_token" in body or "accessToken" in body:
+                            import json as _json
+                            try:
+                                d = _json.loads(body)
+                                at = d.get("access_token") or d.get("accessToken")
+                                if at:
+                                    status(f"Токен захвачен из fetch ({c.get('url','?')[-60:]})!")
+                                    _early_token = _json.dumps({
+                                        "access_token": at,
+                                        "refresh_token": d.get("refresh_token") or d.get("refreshToken"),
+                                        "expire_time": d.get("expire_time") or d.get("expireTime"),
+                                        "refresh_expire_time": d.get("refresh_expire_time") or d.get("refreshExpireTime"),
+                                    })
+                                    break
+                            except Exception:
+                                pass
+                    if _early_token:
+                        break
+                except Exception:
+                    pass
+
             # На /login?token= — через 5с дампим состояние страницы (SSR Nuxt)
-            if "turbo-pvz.ozon.ru/login" in current_url and "token=" in current_url and not _login_page_dump_done and _ >= 5:
+            if "turbo-pvz.ozon.ru/login" in current_url and "token=" in current_url and not _login_page_dump_done and _ >= 5 and _ % 20 == 5:
                 _login_page_dump_done = True
                 try:
                     page_info = driver.execute_script("""

@@ -236,7 +236,7 @@ def _chrome_login_sync(
 
     driver = None
     try:
-        driver = uc.Chrome(options=options, version_main=146)
+        driver = uc.Chrome(options=options, version_main=148)
         driver.set_page_load_timeout(60)
         driver.implicitly_wait(5)
 

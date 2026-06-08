@@ -40,7 +40,7 @@ def _scrape_claim_sync(claim_id: str, store_id: str, request_type: str = "Claim"
 
     driver = None
     try:
-        driver = uc.Chrome(options=options, version_main=146)
+        driver = uc.Chrome(options=options, version_main=148)
         driver.set_page_load_timeout(45)
 
         # Инжектируем SSO куки через CDP

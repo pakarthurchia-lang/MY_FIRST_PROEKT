@@ -96,10 +96,38 @@ async def _start_web_login(message: Message, state: FSMContext, phone: str):
             parse_mode="HTML",
         )
 
-    # callback — статусные сообщения
+    # Технические паттерны которые не нужны пользователю
+    _SKIP = [
+        "[{", "https://", "JWT-like", "Inputs:", "API после",
+        "Инжектировано", "Кнопки на странице", "URL после",
+        "Пробую auth", "конфига:", "Токен в LS", "На sso.ozon.ru",
+        "Переход на страницу", "На странице входа", "Жду email инпут",
+        "Нажата кнопка", "Попали на /stores", "Форма email открыта",
+        "Токен получен (Client", "StoreId=нет", "Ожидаю код",
+    ]
+    _REPLACE = {
+        "Открываю turbo-pvz.ozon.ru/login...": "Открываю Ozon...",
+        "Переключаюсь на вход по почте...": "Вхожу по email...",
+        "Ожидаю авторизацию...": "Авторизуюсь...",
+        "StoreId отсутствует — открываю страницу магазина...": "Выбираю ПВЗ...",
+        "Получаю токен...": None,
+    }
+
     async def on_status(msg: str):
+        if any(p in msg for p in _SKIP):
+            return
+        display = _REPLACE.get(msg, msg)
+        if display is None:
+            return
+        # "Нашёл карточку: 'ВНУКОВСКОЕ_28 Россия, Москва..." → "ПВЗ: ВНУКОВСКОЕ_28"
+        if display.startswith("Нашёл карточку:"):
+            name = display.split("'")[1].split(" ")[0] if "'" in display else ""
+            display = f"ПВЗ: {name}" if name else display
+        # "Получен токен со StoreId=..." → "ПВЗ подключён ✅"
+        if display.startswith("Получен токен со StoreId"):
+            display = "ПВЗ подключён ✅"
         try:
-            await message.answer(f"🔄 {msg}")
+            await message.answer(f"🔄 {display}")
         except Exception:
             pass
 
@@ -310,7 +338,24 @@ async def cmd_wb_token(message: Message):
     )
 
 
-# ── /wb_login ─────────────────────────────────────────────────────────────────
+# ── /wb_login + кнопка wb:login ───────────────────────────────────────────────
+
+@router.callback_query(F.data == "wb:login")
+async def cb_wb_login(call, state: FSMContext):
+    from aiogram.types import CallbackQuery as CQ
+    if call.from_user.id != OWNER_CHAT_ID:
+        return
+    await call.answer()
+    await state.clear()
+    if WB_PHONE:
+        await _start_wb_web_login(call.message, state, WB_PHONE)
+    else:
+        await state.set_state(WbLoginState.waiting_phone)
+        await call.message.answer(
+            "📱 Введи номер телефона WB:",
+            parse_mode="HTML",
+        )
+
 
 @router.message(Command("wb_login"))
 async def cmd_wb_login(message: Message, state: FSMContext):
@@ -611,7 +656,7 @@ async def cmd_wb_spy(message: Message):
         opts.page_load_strategy = "eager"
         opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
-        driver = uc.Chrome(options=opts, version_main=146)
+        driver = uc.Chrome(options=opts, version_main=148)
         driver.set_page_load_timeout(60)
 
         try:
