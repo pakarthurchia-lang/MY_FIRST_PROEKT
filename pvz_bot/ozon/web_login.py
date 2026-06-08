@@ -214,6 +214,7 @@ def _chrome_login_sync(
 
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1280,720")
+    options.add_argument("--window-position=-32000,-32000")
     options.page_load_strategy = "eager"
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
