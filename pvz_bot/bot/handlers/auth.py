@@ -159,9 +159,17 @@ async def _start_web_login(message: Message, state: FSMContext, phone: str):
     from ozon import http_client
     http_client._token_data = {}
 
+    # Сразу обновляем токен через ozonIdCookie/V3 чтобы получить StoreId
+    # (SSO куки только что сохранены web_login'ом, ozonIdCookie/V3 теперь работает)
+    try:
+        await http_client._force_renew()
+    except Exception:
+        pass  # Используем Web токен если не получилось
+
     # Определяем тип токена
-    from ozon.http_client import _jwt_decode
-    claims = _jwt_decode(token_data.get("access_token", ""))
+    from ozon.http_client import _jwt_decode, _load_token
+    effective_token = http_client._token_data or _load_token()
+    claims = _jwt_decode(effective_token.get("access_token", ""))
     client_type = claims.get("ClientType", "?")
 
     await message.answer(
