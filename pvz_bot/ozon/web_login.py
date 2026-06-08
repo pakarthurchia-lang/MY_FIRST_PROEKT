@@ -1204,8 +1204,9 @@ def _chrome_login_sync(
                         pass
 
                 cur = driver.current_url
-                # Если SPA перенаправил на /stores — кликаем по карточке через ActionChains
-                if "/stores" in cur and not _store_clicked and _si >= 2:
+                # Кликаем на карточку магазина — как на /stores, так и на главной (URL не меняется в новом турбо-озоне)
+                _on_pvz_page = ("/stores" in cur or "turbo-pvz.ozon.ru" in cur)
+                if _on_pvz_page and not _store_clicked and _si >= 3:
                     _store_clicked = True
                     status("Попали на /stores — кликаю на карточку магазина (ActionChains)...")
                     time.sleep(2)  # ждём рендер карточек
@@ -1231,9 +1232,8 @@ def _chrome_login_sync(
                                     if (!el || el === document.body) break;
                                     var r = el.getBoundingClientRect();
                                     var elText = el.textContent || '';
-                                    // Карточка: видима, подходящий размер, не содержит второй магазин
-                                    if (r.width > 200 && r.height > 40 &&
-                                        elText.includes(t.has) && !elText.includes(t.hasNot)) {
+                                    // Карточка: содержит нужный текст, не содержит второй магазин
+                                    if (elText.includes(t.has) && !elText.includes(t.hasNot)) {
                                         best = el;  // запоминаем — берём самый маленький подходящий
                                     }
                                     el = el.parentElement;
@@ -1248,9 +1248,7 @@ def _chrome_login_sync(
                         try:
                             txt = store_el.text[:80].replace("\n", " ")
                             status(f"Нашёл карточку: '{txt}' — кликаю...")
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", store_el)
-                            time.sleep(0.5)
-                            ActionChains(driver).move_to_element(store_el).pause(0.3).click().perform()
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", store_el)
                             time.sleep(4)
                             status(f"URL после клика: {driver.current_url[:80]}")
                             # Дамп API вызовов — что сделала SPA после клика
