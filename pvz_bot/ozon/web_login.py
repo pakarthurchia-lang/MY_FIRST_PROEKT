@@ -1155,7 +1155,7 @@ def _chrome_login_sync(
                     driver.get("https://turbo-pvz.ozon.ru/")
                 except Exception:
                     pass
-                time.sleep(4)
+                time.sleep(8)
                 clicked_store = driver.execute_script("""
                     var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
                     var links = Array.from(document.querySelectorAll('a'));
