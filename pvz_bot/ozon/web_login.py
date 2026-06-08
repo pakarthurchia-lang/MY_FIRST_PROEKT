@@ -98,6 +98,60 @@ async def _get_redirect_token() -> str:
         return ""
 
 
+def _ensure_store_id(driver, status_fn, token_data: dict) -> dict:
+    """Если в токене нет StoreId — переходит на страницу магазина и ждёт обновления."""
+    claims = _jwt_decode(token_data.get("access_token", ""))
+    if claims.get("StoreId"):
+        return token_data
+
+    status_fn(f"Токен без StoreId (ClientType={claims.get('ClientType','?')}) — открываю страницу магазина...")
+    store_uuid = None
+    try:
+        from config import OZON_STORE_UUID
+        store_uuid = OZON_STORE_UUID
+    except (ImportError, AttributeError):
+        pass
+
+    if store_uuid:
+        status_fn(f"Перехожу на магазин: {store_uuid}")
+        try:
+            driver.get(f"https://turbo-pvz.ozon.ru/{store_uuid}")
+        except Exception:
+            pass
+        time.sleep(3)
+    else:
+        status_fn("OZON_STORE_UUID не задан — StoreId не получить")
+        return token_data
+
+    for i in range(30):
+        time.sleep(1)
+        t = driver.execute_script("return localStorage.getItem('pvz-access-token');")
+        if t:
+            try:
+                d = json.loads(t)
+                nc = _jwt_decode(d.get("access_token", ""))
+                if nc.get("StoreId"):
+                    status_fn(f"Получен токен со StoreId={nc['StoreId']}")
+                    td = {
+                        "access_token": d.get("access_token"),
+                        "refresh_token": d.get("refresh_token"),
+                        "expire_time": d.get("expire_time"),
+                        "refresh_expire_time": d.get("refresh_expire_time"),
+                    }
+                    if not td["expire_time"]:
+                        exp = nc.get("exp", 0)
+                        td["expire_time"] = exp * 1000 if exp else int(time.time() + 8 * 3600) * 1000
+                    _save_pvz_token(td)
+                    return td
+            except Exception:
+                pass
+        if i % 10 == 9:
+            status_fn(f"Жду StoreId {i+1}с... URL: {driver.current_url[:60]}")
+
+    status_fn("⚠️ StoreId не появился за 30с — сохраняю токен без StoreId")
+    return token_data
+
+
 def _try_extract_pvz_token(driver, status_fn) -> dict:
     """Пробует достать PVZ токен из localStorage. Возвращает dict или None."""
     try:
@@ -361,6 +415,8 @@ def _chrome_login_sync(
             time.sleep(3)
             token_data = _try_extract_pvz_token(driver, status)
             if token_data:
+                token_data = _ensure_store_id(driver, status, token_data)
+                _save_browser_cookies(driver)
                 return token_data
             # Если токен не нашли — возможно нужно выбрать магазин (страница /stores)
             status(f"Токен не найден сразу — URL: {cur_url[:80]}, продолжаю...")
@@ -380,6 +436,8 @@ def _chrome_login_sync(
                 time.sleep(3)
                 token_data = _try_extract_pvz_token(driver, status)
                 if token_data:
+                    token_data = _ensure_store_id(driver, status, token_data)
+                    _save_browser_cookies(driver)
                     return token_data
 
         time.sleep(2)
@@ -1010,6 +1068,7 @@ def _chrome_login_sync(
                                 "refresh_expire_time": token_data_raw.get("refresh_expire_time"),
                             }
                             if token_data["access_token"]:
+                                token_data = _ensure_store_id(driver, status, token_data)
                                 _save_browser_cookies(driver)
                                 _save_pvz_token(token_data)
                                 return token_data
@@ -1064,6 +1123,7 @@ def _chrome_login_sync(
                                 "expire_time": d.get('expire_time'),
                                 "refresh_expire_time": d.get('refresh_expire_time'),
                             }
+                            token_data = _ensure_store_id(driver, status, token_data)
                             _save_browser_cookies(driver)
                             _save_pvz_token(token_data)
                             return token_data
@@ -1301,14 +1361,24 @@ def _chrome_login_sync(
 
 
 def _save_browser_cookies(driver):
-    """Сохраняет SSO куки из Chrome в ozon_session.json."""
+    """Сохраняет SSO куки из Chrome в ozon_session.json (мёрдж с существующими)."""
     from config import OZON_SESSION_FILE
 
-    browser_cookies = driver.get_cookies()
-    sso_cookies = []
-    for c in browser_cookies:
+    # Загружаем существующие куки как базу (ключ = name)
+    existing: dict = {}
+    try:
+        with open(OZON_SESSION_FILE) as _f:
+            _state = json.load(_f)
+        for _c in _state.get("cookies", []):
+            existing[_c["name"]] = _c
+    except Exception:
+        pass
+
+    # Chrome-куки перезаписывают существующие с тем же именем,
+    # но куки которых нет в Chrome (например turbo-pvz специфичные) — сохраняются
+    for c in driver.get_cookies():
         if c.get("domain", "").endswith("ozon.ru"):
-            sso_cookies.append({
+            existing[c["name"]] = {
                 "name": c["name"],
                 "value": c["value"],
                 "domain": c.get("domain", ".ozon.ru"),
@@ -1317,12 +1387,13 @@ def _save_browser_cookies(driver):
                 "secure": c.get("secure", True),
                 "sameSite": c.get("sameSite", "Lax"),
                 "expires": int(c.get("expiry", time.time() + 365 * 86400)),
-            })
+            }
 
-    if sso_cookies:
+    merged = list(existing.values())
+    if merged:
         os.makedirs(os.path.dirname(OZON_SESSION_FILE), exist_ok=True)
         with open(OZON_SESSION_FILE, "w") as f:
-            json.dump({"cookies": sso_cookies, "origins": []}, f, indent=2)
+            json.dump({"cookies": merged, "origins": []}, f, indent=2)
         os.chmod(OZON_SESSION_FILE, 0o600)
 
 
