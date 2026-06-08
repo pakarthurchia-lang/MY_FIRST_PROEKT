@@ -50,10 +50,10 @@ MOBILE_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "x-o3-app-name": "ozonpvzapp_ios",
-    "x-o3-app-version": "3.50.0(609)",
-    "x-o3-version-code": "609",
+    "x-o3-app-version": "3.55.0(660)",
+    "x-o3-version-code": "660",
     "x-operating-system": "ios",
-    "x-o3-version-name": "3.50.0",
+    "x-o3-version-name": "3.55.0",
     "x-o3-fp": "0.ba55bb2ca4aca37d",
     "user-agent": "ozonpvzapp_ios_prod",
     "accept-language": "ru-UM",
@@ -63,7 +63,7 @@ SSO_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "x-o3-app-name": "ozonpvzapp_ios",
-    "x-o3-app-version": "3.50.0(609)",
+    "x-o3-app-version": "3.55.0(660)",
     "x-o3-fp": "0.ba55bb2ca4aca37d",
     "user-agent": "ozonpvzapp_ios_prod",
 }
@@ -406,6 +406,12 @@ async def get_access_token() -> str:
         _token_data = _load_token()
 
     if not _is_token_expired(_token_data):
+        return _token_data["access_token"]
+
+    # Перед API-обновлением проверяем файл — вдруг login только что сохранил свежий токен
+    fresh = _load_token()
+    if not _is_token_expired(fresh):
+        _token_data = fresh
         return _token_data["access_token"]
 
     _token_data = await _renew_token()
