@@ -1149,13 +1149,18 @@ def _chrome_login_sync(
                 except Exception:
                     pass
             else:
-                # Идём на главную и кликаем первую ссылку с UUID-подобным href
-                status("OZON_STORE_UUID не задан — ищу магазин на главной странице...")
-                try:
-                    driver.get("https://turbo-pvz.ozon.ru/")
-                except Exception:
-                    pass
-                time.sleep(8)
+                # Если уже на турбо-озоне — не перезагружаем страницу, просто ждём рендера
+                _cur_url = driver.current_url
+                if "turbo-pvz.ozon.ru" not in _cur_url:
+                    status("OZON_STORE_UUID не задан — перехожу на главную...")
+                    try:
+                        driver.get("https://turbo-pvz.ozon.ru/")
+                    except Exception:
+                        pass
+                    time.sleep(8)
+                else:
+                    status("Уже на turbo-pvz.ozon.ru — жду рендер магазинов...")
+                    time.sleep(5)
                 clicked_store = driver.execute_script("""
                     var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
                     var links = Array.from(document.querySelectorAll('a'));
@@ -1224,7 +1229,7 @@ def _chrome_login_sync(
                                 document.body, NodeFilter.SHOW_TEXT, null, false);
                             while (walker.nextNode()) {
                                 var node = walker.currentNode;
-                                if (!node.textContent.trim().includes(t.has)) continue;
+                                if (!node.textContent.trim().toUpperCase().includes(t.has)) continue;
                                 // Поднимаемся по DOM
                                 var el = node.parentElement;
                                 var best = null;
@@ -1232,8 +1237,9 @@ def _chrome_login_sync(
                                     if (!el || el === document.body) break;
                                     var r = el.getBoundingClientRect();
                                     var elText = el.textContent || '';
-                                    // Карточка: содержит нужный текст, не содержит второй магазин
-                                    if (elText.includes(t.has) && !elText.includes(t.hasNot)) {
+                                    // Карточка: содержит нужный текст, не содержит второй магазин (регистронезависимо)
+                                    var elUpper = elText.toUpperCase();
+                                    if (elUpper.includes(t.has) && !elUpper.includes(t.hasNot)) {
                                         best = el;  // запоминаем — берём самый маленький подходящий
                                     }
                                     el = el.parentElement;
