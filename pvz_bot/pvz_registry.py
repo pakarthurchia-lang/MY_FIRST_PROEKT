@@ -59,9 +59,9 @@ async def refresh_ozon() -> None:
                 for s in stores if s.get("id")]
         if pvzs:
             update_platform("ozon", pvzs)
-            print(f"✅ Ozon ПВЗ в реестре: {[p['pvz_name'] for p in pvzs]}")
+            print(f"Ozon PVZ registered: {[p['pvz_name'] for p in pvzs]}", flush=True)
     except Exception as e:
-        print(f"⚠️ Ozon реестр не обновлён: {e}")
+        print(f"Ozon registry error: {e}", flush=True)
 
 
 async def refresh_ym() -> None:
@@ -77,9 +77,9 @@ async def refresh_ym() -> None:
         pvzs = [{"pvz_id": None, "pvz_name": name} for name in names if name]
         if pvzs:
             update_platform("ym", pvzs)
-            print(f"✅ ЯМ ПВЗ в реестре: {[p['pvz_name'] for p in pvzs]}")
+            print(f"YM PVZ registered: {[p['pvz_name'] for p in pvzs]}", flush=True)
     except Exception as e:
-        print(f"⚠️ ЯМ реестр не обновлён: {e}")
+        print(f"YM registry error: {e}", flush=True)
 
 
 def refresh_wb() -> None:
@@ -92,9 +92,9 @@ def refresh_wb() -> None:
             return
         pvz_name = wb.get("pvz_address") or f"WB ПВЗ #{pid}"
         update_platform("wb", [{"pvz_id": str(pid), "pvz_name": pvz_name}])
-        print(f"✅ WB ПВЗ в реестре: {pvz_name}")
+        print(f"WB PVZ registered: {pvz_name}", flush=True)
     except Exception as e:
-        print(f"⚠️ WB реестр не обновлён: {e}")
+        print(f"WB registry error: {e}", flush=True)
 
 
 async def refresh_all() -> None:
