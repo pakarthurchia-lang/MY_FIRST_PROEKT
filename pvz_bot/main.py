@@ -3,6 +3,10 @@ import logging
 import os
 import signal
 import sys
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from bot.handlers import auth, claims, menu, ym_upload, wb_upload, audit, location_setup
