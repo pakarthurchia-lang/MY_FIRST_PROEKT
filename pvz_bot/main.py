@@ -28,9 +28,13 @@ def _kill_previous():
             old_pid = int(f.read().strip())
         if old_pid != os.getpid():
             try:
-                os.kill(old_pid, signal.SIGKILL)
+                if sys.platform == "win32":
+                    import subprocess
+                    subprocess.call(["taskkill", "/F", "/PID", str(old_pid)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    os.kill(old_pid, signal.SIGKILL)
                 logger.info(f"Остановлен предыдущий экземпляр (pid {old_pid})")
-                # Ждём завершения чтобы освободить Telegram polling
                 import time
                 time.sleep(2)
             except (ProcessLookupError, PermissionError):
