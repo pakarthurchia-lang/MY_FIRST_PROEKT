@@ -96,9 +96,24 @@ async def _start_web_login(message: Message, state: FSMContext, phone: str):
             parse_mode="HTML",
         )
 
-    # ДИАГНОСТИКА: фильтрация отключена — показываем всё
-    _SKIP: list = []
-    _REPLACE: dict = {}
+    _SKIP = [
+        "[{", "https://", "JWT-like", "Inputs:", "API после",
+        "Инжектировано", "Кнопки на странице", "URL после",
+        "Пробую auth", "конфига:", "Токен в LS", "На sso.ozon.ru",
+        "Переход на страницу", "На странице входа", "Жду email инпут",
+        "Нажата кнопка", "Попали на /stores", "Форма email открыта",
+        "Токен получен (Client", "StoreId=нет", "Ожидаю код",
+        "Текст /stores", "SPA на /stores", "SPA перенаправил",
+    ]
+    _REPLACE = {
+        "Открываю turbo-pvz.ozon.ru/login...": "Открываю Ozon...",
+        "Переключаюсь на вход по почте...": "Вхожу по email...",
+        "Ожидаю авторизацию...": "Авторизуюсь...",
+        "StoreId отсутствует — открываю страницу магазина...": "Выбираю ПВЗ...",
+        "Токен без StoreId (ClientType=Web) — открываю страницу магазина...": "Выбираю ПВЗ...",
+        "Получаю токен...": None,
+        "Перехожу на магазин:": None,
+    }
 
     async def on_status(msg: str):
         if any(p in msg for p in _SKIP):
