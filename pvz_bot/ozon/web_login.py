@@ -892,51 +892,55 @@ def _chrome_login_sync(
                 _sms_handled = True
                 status("Новое устройство — нужен SMS код...")
 
-                # Ждём полной загрузки страницы
-                time.sleep(3)
+                # Ждём полной загрузки страницы (Windows + VPN медленнее)
+                time.sleep(8)
 
-                # Логируем все кнопки на странице для диагностики
+                # Логируем все кликабельные элементы для диагностики
                 all_page_btns = driver.execute_script("""
-                    return Array.from(document.querySelectorAll('button')).map(function(b) {
+                    var sel = 'button, a, input[type=submit], input[type=button], [role=button]';
+                    return Array.from(document.querySelectorAll(sel)).map(function(b) {
                         var r = b.getBoundingClientRect();
-                        return {text: (b.innerText||b.textContent||'').trim().slice(0,50), w: Math.round(r.width), h: Math.round(r.height)};
-                    });
+                        return {tag: b.tagName, text: (b.innerText||b.textContent||b.value||'').trim().slice(0,50), w: Math.round(r.width), h: Math.round(r.height)};
+                    }).filter(function(b){ return b.w > 0; });
                 """)
                 status(f"Кнопки на странице OTP: {all_page_btns}")
 
-                # Кликаем кнопку отправки SMS — явно исключаем "скрыть"
+                # Кликаем кнопку отправки SMS
                 clicked = driver.execute_script("""
                     function findBtn(root) {
-                        var btns = Array.from(root.querySelectorAll('button'));
+                        var sel = 'button, a, input[type=submit], input[type=button], [role=button]';
+                        var els = Array.from(root.querySelectorAll(sel));
                         var skip = ['скрыть', 'закрыть', 'отмена', 'cancel', 'back', 'назад'];
                         var keywords = ['отправить sms', 'отправить смс', 'получить sms', 'получить смс',
-                                        'войти', 'подтвердить', 'получить код', 'отправить код', 'confirm', 'send', 'продолжить'];
-                        // Позитивный поиск
+                                        'войти', 'подтвердить', 'получить код', 'отправить код',
+                                        'confirm', 'send', 'продолжить', 'continue', 'далее', 'next'];
                         for (var kw of keywords) {
-                            for (var b of btns) {
-                                var txt = (b.innerText||b.textContent||'').toLowerCase();
+                            for (var b of els) {
+                                var txt = (b.innerText||b.textContent||b.value||'').toLowerCase();
                                 var r = b.getBoundingClientRect();
-                                if (r.width > 0 && r.height > 0 && txt.includes(kw)) return b;
+                                if (r.width > 0 && r.height > 0 && txt.includes(kw)) { b.click(); return txt.trim().slice(0,40); }
                             }
                         }
-                        // Fallback: последняя видимая кнопка, НЕ из списка skip
-                        var visible = btns.filter(function(b) {
+                        // Fallback: последний видимый элемент не из skip
+                        var visible = els.filter(function(b) {
                             var r = b.getBoundingClientRect();
                             if (r.width <= 0 || r.height <= 0) return false;
-                            var txt = (b.innerText||b.textContent||'').toLowerCase();
+                            var txt = (b.innerText||b.textContent||b.value||'').toLowerCase();
                             return !skip.some(function(s) { return txt.includes(s); });
                         });
-                        return visible.length > 0 ? visible[visible.length - 1] : null;
+                        if (visible.length > 0) { visible[visible.length-1].click(); return (visible[visible.length-1].innerText||visible[visible.length-1].textContent||'fallback').trim().slice(0,40); }
+                        return null;
                     }
                     var btn = findBtn(document);
-                    if (!btn) {
-                        var all = document.querySelectorAll('*');
-                        for (var el of all) {
-                            if (el.shadowRoot) { btn = findBtn(el.shadowRoot); if (btn) break; }
-                        }
+                    if (btn !== null) return btn;
+                    // Shadow DOM поиск
+                    var all = document.querySelectorAll('*');
+                    for (var el of all) {
+                        if (el.shadowRoot) { var r = findBtn(el.shadowRoot); if (r !== null) return r; }
                     }
-                    if (btn) { btn.click(); return (btn.innerText||btn.textContent||'').trim().slice(0,40); }
-                    return null;
+                    // Крайний fallback: нажимаем Enter (может сработать если кнопка Submit)
+                    document.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', keyCode:13, bubbles:true}));
+                    return 'Enter-fallback';
                 """)
                 status(f"Кнопка нажата: '{clicked}' — ждём SMS...")
                 time.sleep(4)
