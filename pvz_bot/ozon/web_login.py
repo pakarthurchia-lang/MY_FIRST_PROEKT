@@ -118,12 +118,44 @@ def _ensure_store_id(driver, status_fn, token_data: dict) -> dict:
             driver.get(f"https://turbo-pvz.ozon.ru/{store_uuid}")
         except Exception:
             pass
-        time.sleep(3)
+        time.sleep(4)
+
+        # SPA может перенаправить на /stores — тогда кликаем карточку магазина
+        cur = driver.current_url
+        if "/stores" in cur or cur.rstrip("/").endswith("turbo-pvz.ozon.ru"):
+            status_fn(f"SPA перенаправил на /stores — кликаю карточку магазина...")
+            time.sleep(3)  # ждём рендер карточек
+            clicked = driver.execute_script("""
+                var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+                // Сначала ищем ссылки с UUID в href
+                var links = Array.from(document.querySelectorAll('a'));
+                for (var el of links) {
+                    var href = el.getAttribute('href') || '';
+                    if (uuidRe.test(href)) {
+                        el.scrollIntoView({block:'center'});
+                        el.click();
+                        return 'link:' + href.slice(0,50);
+                    }
+                }
+                // Fallback: любой кликабельный элемент с UUID в атрибутах
+                var all = Array.from(document.querySelectorAll('[href],[data-id],[data-uuid],[id]'));
+                for (var el of all) {
+                    var attrs = (el.getAttribute('href')||'') + (el.getAttribute('data-id')||'') + (el.getAttribute('id')||'');
+                    if (uuidRe.test(attrs)) {
+                        el.scrollIntoView({block:'center'});
+                        el.click();
+                        return 'attr:' + attrs.slice(0,50);
+                    }
+                }
+                return null;
+            """)
+            status_fn(f"Клик на карточку: {clicked}")
+            time.sleep(4)
     else:
         status_fn("OZON_STORE_UUID не задан — StoreId не получить")
         return token_data
 
-    for i in range(30):
+    for i in range(45):
         time.sleep(1)
         t = driver.execute_script("return localStorage.getItem('pvz-access-token');")
         if t:
@@ -148,7 +180,7 @@ def _ensure_store_id(driver, status_fn, token_data: dict) -> dict:
         if i % 10 == 9:
             status_fn(f"Жду StoreId {i+1}с... URL: {driver.current_url[:60]}")
 
-    status_fn("⚠️ StoreId не появился за 30с — сохраняю токен без StoreId")
+    status_fn("⚠️ StoreId не появился за 45с — сохраняю токен без StoreId")
     return token_data
 
 
