@@ -120,31 +120,49 @@ def _ensure_store_id(driver, status_fn, token_data: dict) -> dict:
             pass
         time.sleep(4)
 
-        # SPA может перенаправить на /stores — тогда кликаем карточку магазина
+        # SPA может перенаправить на /stores — тогда кликаем карточку магазина по тексту
         cur = driver.current_url
         if "/stores" in cur or cur.rstrip("/").endswith("turbo-pvz.ozon.ru"):
-            status_fn(f"SPA перенаправил на /stores — кликаю карточку магазина...")
-            time.sleep(3)  # ждём рендер карточек
+            status_fn(f"SPA на /stores — ищу карточку магазина по тексту...")
+            time.sleep(4)  # ждём рендер карточек
+
+            # Дамп текста страницы для диагностики
+            page_text = driver.execute_script("return document.body ? document.body.innerText.slice(0, 400) : 'no body';")
+            status_fn(f"Текст /stores: {page_text[:300]}")
+
+            # Кликаем карточку по тексту с названием магазина
             clicked = driver.execute_script("""
-                var uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-                // Сначала ищем ссылки с UUID в href
-                var links = Array.from(document.querySelectorAll('a'));
-                for (var el of links) {
-                    var href = el.getAttribute('href') || '';
-                    if (uuidRe.test(href)) {
-                        el.scrollIntoView({block:'center'});
-                        el.click();
-                        return 'link:' + href.slice(0,50);
+                var keywords = ['внуковск', 'ростов', 'pvz', 'пвз', 'магазин', 'store'];
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                while (walker.nextNode()) {
+                    var node = walker.currentNode;
+                    var txt = (node.textContent || '').trim().toLowerCase();
+                    if (txt.length < 3) continue;
+                    for (var ki = 0; ki < keywords.length; ki++) {
+                        if (txt.includes(keywords[ki])) {
+                            // Поднимаемся по DOM — ищем карточку (разумный размер)
+                            var el = node.parentElement;
+                            for (var j = 0; j < 10; j++) {
+                                if (!el || el === document.body || el === document.documentElement) break;
+                                var r = el.getBoundingClientRect();
+                                if (r.width > 80 && r.height > 40 && r.width < 700) {
+                                    el.scrollIntoView({block: 'center'});
+                                    el.click();
+                                    return keywords[ki] + ':' + el.tagName + ':' + (el.textContent||'').trim().slice(0,40);
+                                }
+                                el = el.parentElement;
+                            }
+                        }
                     }
                 }
-                // Fallback: любой кликабельный элемент с UUID в атрибутах
-                var all = Array.from(document.querySelectorAll('[href],[data-id],[data-uuid],[id]'));
-                for (var el of all) {
-                    var attrs = (el.getAttribute('href')||'') + (el.getAttribute('data-id')||'') + (el.getAttribute('id')||'');
-                    if (uuidRe.test(attrs)) {
-                        el.scrollIntoView({block:'center'});
-                        el.click();
-                        return 'attr:' + attrs.slice(0,50);
+                // Fallback: кликаем первый div/li среднего размера
+                var els = Array.from(document.querySelectorAll('div, li, article, section'));
+                for (var i = 0; i < els.length; i++) {
+                    var r = els[i].getBoundingClientRect();
+                    if (r.width > 100 && r.width < 600 && r.height > 50 && r.height < 300) {
+                        els[i].scrollIntoView({block: 'center'});
+                        els[i].click();
+                        return 'div-fallback:' + (els[i].textContent||'').trim().slice(0,40);
                     }
                 }
                 return null;
