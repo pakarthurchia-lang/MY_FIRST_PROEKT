@@ -82,7 +82,7 @@ class WaterOrderer:
         await self.page.locator('input[type="password"]').first.fill(self._password)
 
         # Submit
-        for sel in ['button[type="submit"]', 'input[type="submit"]', 'button.submit', '.wa-submit']:
+        for sel in ['.wa-login-submit', 'input[type="submit"]', 'button[type="submit"]', 'button.submit']:
             btn = self.page.locator(sel).first
             if await btn.count():
                 await btn.click()
