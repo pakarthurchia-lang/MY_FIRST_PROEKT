@@ -376,6 +376,7 @@ async def handle_cancel(callback: CallbackQuery, state: FSMContext):
 
 async def main():
     log.info("Bot starting…")
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
