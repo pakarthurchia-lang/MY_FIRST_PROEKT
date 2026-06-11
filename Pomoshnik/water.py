@@ -88,7 +88,16 @@ class WaterOrderer:
                 await btn.click()
                 break
 
-        await self.page.wait_for_load_state("networkidle")
+        # Wait for navigation away from login page (up to 10 seconds)
+        try:
+            await self.page.wait_for_url(
+                lambda url: "/login/" not in url,
+                timeout=10000,
+            )
+        except Exception:
+            pass
+
+        await self.page.wait_for_timeout(1000)
         await self._shot("login_result")
 
         success = "/login/" not in self.page.url
