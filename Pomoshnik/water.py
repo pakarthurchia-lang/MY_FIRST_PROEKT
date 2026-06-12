@@ -163,11 +163,12 @@ class WaterOrderer:
                 break
 
         if went_to_cart:
-            await self.page.wait_for_load_state("networkidle")
+            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
         else:
             log.warning("Popup 'Перейти в корзину' не найден — перехожу напрямую")
-            await self.page.goto(URL_CART, wait_until="networkidle")
+            await self.page.goto(URL_CART, wait_until="domcontentloaded", timeout=15000)
 
+        await self.page.wait_for_timeout(2000)
         await self._shot("cart_page")
 
     # ── step 3: fill delivery form, get time slots ─────────────────────────
@@ -175,7 +176,7 @@ class WaterOrderer:
     async def fill_delivery(self, date_str: str) -> list[str]:
         """Fill quantity, city, date. Returns available time slots."""
         self._date_str = date_str
-        await self.page.wait_for_load_state("networkidle")
+        await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
 
         # Update quantity in cart (in case product page didn't apply it)
         for sel in [
@@ -344,7 +345,7 @@ class WaterOrderer:
             btn = self.page.locator(sel).first
             if await btn.count():
                 await btn.click()
-                await self.page.wait_for_load_state("networkidle")
+                await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
                 await self._shot("order_placed")
                 return True
 
