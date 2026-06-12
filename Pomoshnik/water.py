@@ -121,7 +121,6 @@ class WaterOrderer:
             ]:
                 el = self.page.locator(sel).first
                 if await el.count():
-                    await el.triple_click()
                     await el.fill(str(quantity))
                     break
 
@@ -186,7 +185,6 @@ class WaterOrderer:
         ]:
             el = self.page.locator(sel).first
             if await el.count():
-                await el.triple_click()
                 await el.fill(str(self._qty))
                 await el.press("Tab")
                 await self.page.wait_for_timeout(1000)
@@ -205,7 +203,6 @@ class WaterOrderer:
         ]:
             el = self.page.locator(sel).first
             if await el.count():
-                await el.triple_click()
                 await el.fill(self._city)
                 break
 
@@ -272,7 +269,6 @@ class WaterOrderer:
 
         # Fallback: type the date directly into the input
         log.warning(f"Не нашёл день {day} в календаре, ввожу текстом")
-        await date_input.triple_click()
         await date_input.fill(dt.strftime("%d.%m.%Y"))
         await self.page.keyboard.press("Escape")
 
