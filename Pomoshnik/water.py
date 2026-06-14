@@ -171,12 +171,28 @@ class WaterOrderer:
         await self.page.wait_for_timeout(800)
 
         # Fill city — after this date/time fields appear
+        # Use Tab + blur instead of Enter to avoid triggering a form submit crash
         date_sel = 'input[name="details[custom][desired_delivery.date_str]"]'
         for sel in ['input[name="region[city]"]', '.js-city-field', 'input[placeholder*="ород"]']:
             el = self.page.locator(sel).first
             if await el.count():
                 await el.fill(self._city)
-                await el.press("Enter")
+                await self.page.wait_for_timeout(400)
+                await self.page.evaluate("""
+                    () => {
+                        var sels = ['input[name="region[city]"]', '.js-city-field'];
+                        for (var s of sels) {
+                            var el = document.querySelector(s);
+                            if (el) {
+                                el.dispatchEvent(new Event('input',  {bubbles: true}));
+                                el.dispatchEvent(new Event('change', {bubbles: true}));
+                                el.blur();
+                                break;
+                            }
+                        }
+                    }
+                """)
+                await self.page.wait_for_timeout(500)
                 break
 
         # Wait for date field to appear
