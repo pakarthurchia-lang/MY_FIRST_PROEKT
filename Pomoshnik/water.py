@@ -78,11 +78,33 @@ class WaterOrderer:
 
         await self.page.locator('input[type="password"]').first.fill(self._password)
 
-        for sel in ['.wa-login-submit', 'input[type="submit"]', 'button[type="submit"]']:
-            btn = self.page.locator(sel).first
-            if await btn.count():
-                await btn.click()
+        await self.page.wait_for_timeout(500)
+
+        # Wait for submit button to become visible, then click
+        submit_sels = [
+            '.wa-login-submit',
+            'input.wa-login-submit',
+            'input[type="submit"]',
+            'button[type="submit"]',
+            'button:has-text("Войти")',
+            'input[value="Войти"]',
+        ]
+        clicked = False
+        for sel in submit_sels:
+            try:
+                await self.page.wait_for_selector(sel, timeout=3000)
+                await self.page.locator(sel).first.click()
+                clicked = True
+                log.info(f"Login button clicked via {sel}")
                 break
+            except Exception:
+                continue
+
+        if not clicked:
+            log.warning("Login button not found — trying JS click on wa-login-submit")
+            await self.page.evaluate(
+                "() => { var b = document.querySelector('.wa-login-submit'); if(b) b.click(); }"
+            )
 
         try:
             await self.page.wait_for_url(lambda u: "/login/" not in u, timeout=10000)
