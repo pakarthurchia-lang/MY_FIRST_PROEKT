@@ -130,22 +130,8 @@ class WaterOrderer:
         await self.page.wait_for_timeout(2000)
         await self._shot("popup_after_add")
 
-        went = False
-        for sel in [
-            'a:has-text("Перейти в корзину")',
-            'button:has-text("Перейти в корзину")',
-            'a[href*="/order"]',
-        ]:
-            btn = self.page.locator(sel).first
-            if await btn.count():
-                await btn.click()
-                went = True
-                break
-
-        if went:
-            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-        else:
-            await self.page.goto(URL_CART, wait_until="domcontentloaded", timeout=15000)
+        # Skip popup click — it closes too fast. Navigate directly to cart.
+        await self.page.goto(URL_CART, wait_until="domcontentloaded", timeout=15000)
 
         await self.page.wait_for_timeout(2000)
         await self._shot("cart_page")

@@ -128,7 +128,8 @@ async def _launch_and_get_slots(message: Message, state: FSMContext):
 
     except Exception as e:
         log.exception("Ошибка при подготовке заказа")
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        err = str(e)[:200]
+        await status_msg.edit_text(f"❌ Ошибка: {err}")
         await _close_session(user_id)
         await state.clear()
 
