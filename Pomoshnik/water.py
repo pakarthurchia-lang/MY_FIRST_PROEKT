@@ -197,10 +197,10 @@ class WaterOrderer:
 
         # Fill city
         for sel in [
+            'input[name="region[city]"]',
+            '.js-city-field',
             'input[name="city"]',
-            'input[name="params[city]"]',
             'input[placeholder*="ород"]',
-            'input[placeholder*="Город"]',
         ]:
             el = self.page.locator(sel).first
             if await el.count():
@@ -213,12 +213,10 @@ class WaterOrderer:
         target_dt = parse_date(date_str)
         date_opened = False
         for sel in [
-            'input[name="delivery_date"]',
-            'input[name="params[delivery_date]"]',
-            'input[class*="date"]',
-            'input[placeholder*="ату"]',
-            'input[placeholder*="Дату"]',
-            '.datepicker-input',
+            'input[name="details[custom][desired_delivery.date_str]"]',
+            '#wahtmlcontrol_details_custom_desired_delivery_date_str',
+            'input[placeholder="ДД.ММ.ГГГГ"]',
+            'input.hasDatepicker',
         ]:
             el = self.page.locator(sel).first
             if await el.count():
@@ -275,11 +273,10 @@ class WaterOrderer:
 
     async def _get_time_slots(self) -> list[str]:
         for sel in [
-            'select[name="delivery_interval"]',
-            'select[name="params[delivery_interval]"]',
+            'select[name="details[custom][desired_delivery.interval]"]',
+            '#wahtmlcontrol_details_custom_desired_delivery_interval',
             'select[name*="interval"]',
             'select[name*="time"]',
-            '.delivery-time select',
         ]:
             select = self.page.locator(sel).first
             if await select.count():
@@ -296,10 +293,9 @@ class WaterOrderer:
 
     async def select_time(self, time_slot: str) -> dict:
         for sel in [
-            'select[name="delivery_interval"]',
-            'select[name="params[delivery_interval]"]',
+            'select[name="details[custom][desired_delivery.interval]"]',
+            '#wahtmlcontrol_details_custom_desired_delivery_interval',
             'select[name*="interval"]',
-            'select[name*="time"]',
         ]:
             select = self.page.locator(sel).first
             if await select.count():
