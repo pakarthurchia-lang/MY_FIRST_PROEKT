@@ -65,7 +65,7 @@ class WaterOrderer:
 
     async def login(self) -> bool:
         await self.page.goto(URL_LOGIN, wait_until="domcontentloaded")
-        await self.page.wait_for_timeout(1000)
+        await self.page.wait_for_timeout(2000)
 
         if "/login/" not in self.page.url:
             return True
@@ -76,11 +76,15 @@ class WaterOrderer:
                 await el.fill(self._login)
                 break
 
-        pwd = self.page.locator('input[type="password"]').first
-        await pwd.fill(self._password)
-        await self.page.wait_for_timeout(300)
-        # Submit via Enter in password field — avoids DOM polling that crashes Chrome
-        await pwd.press("Enter")
+        await self.page.locator('input[type="password"]').first.fill(self._password)
+        await self.page.wait_for_timeout(500)
+
+        for sel in ['.wa-login-submit', 'input[type="submit"]', 'button[type="submit"]']:
+            btn = self.page.locator(sel).first
+            if await btn.count():
+                await btn.click()
+                log.info(f"Login button clicked: {sel}")
+                break
 
         try:
             await self.page.wait_for_url(lambda u: "/login/" not in u, timeout=10000)
