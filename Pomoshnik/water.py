@@ -195,7 +195,8 @@ class WaterOrderer:
         await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
         await self.page.wait_for_timeout(800)
 
-        # Fill city
+        # Fill city — after this, date/time fields appear dynamically
+        date_sel = 'input[name="details[custom][desired_delivery.date_str]"]'
         for sel in [
             'input[name="region[city]"]',
             '.js-city-field',
@@ -205,15 +206,23 @@ class WaterOrderer:
             el = self.page.locator(sel).first
             if await el.count():
                 await el.fill(self._city)
+                await el.press("Enter")  # confirm autocomplete
                 break
 
+        # Wait for date field to appear after city is filled
+        try:
+            await self.page.wait_for_selector(date_sel, timeout=8000)
+        except Exception:
+            log.warning("Поле даты не появилось после заполнения города")
+
+        await self.page.wait_for_timeout(1000)
         await self._shot("before_date_pick")
 
         # Open date picker
         target_dt = parse_date(date_str)
         date_opened = False
         for sel in [
-            'input[name="details[custom][desired_delivery.date_str]"]',
+            date_sel,
             '#wahtmlcontrol_details_custom_desired_delivery_date_str',
             'input[placeholder="ДД.ММ.ГГГГ"]',
             'input.hasDatepicker',
