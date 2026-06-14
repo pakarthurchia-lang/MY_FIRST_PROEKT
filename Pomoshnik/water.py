@@ -65,9 +65,10 @@ class WaterOrderer:
 
     async def login(self) -> bool:
         await self.page.goto(URL_LOGIN, wait_until="domcontentloaded")
-        await self.page.wait_for_timeout(2000)
+        await self.page.wait_for_timeout(1000)
 
         if "/login/" not in self.page.url:
+            log.info("Already logged in")
             return True
 
         for sel in ['input[name="email"]', 'input[type="email"]', 'input[name="login"]']:
@@ -77,27 +78,24 @@ class WaterOrderer:
                 break
 
         await self.page.locator('input[type="password"]').first.fill(self._password)
-        await self.page.wait_for_timeout(500)
 
-        for sel in ['.wa-login-submit', 'input[type="submit"]', 'button[type="submit"]']:
+        for sel in ['.wa-login-submit', 'input[type="submit"]', 'button[type="submit"]', 'button.submit']:
             btn = self.page.locator(sel).first
             if await btn.count():
                 await btn.click()
-                log.info(f"Login button clicked: {sel}")
                 break
 
         try:
-            await self.page.wait_for_url(lambda u: "/login/" not in u, timeout=10000)
+            await self.page.wait_for_url(lambda url: "/login/" not in url, timeout=10000)
         except Exception:
             pass
 
         await self.page.wait_for_timeout(1000)
         await self._shot("login_result")
 
-        url = self.page.url
-        ok = "/login/" not in url and not url.startswith("chrome-error://")
-        log.info(f"Login {'OK' if ok else 'FAIL'} — {url}")
-        return ok
+        success = "/login/" not in self.page.url
+        log.info(f"Login {'OK' if success else 'FAILED'}, url={self.page.url}")
+        return success
 
     # ── 2. add to cart ─────────────────────────────────────────────────────
 
