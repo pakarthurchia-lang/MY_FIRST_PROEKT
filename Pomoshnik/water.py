@@ -330,6 +330,7 @@ class WaterOrderer:
     # ── 5. confirm order ───────────────────────────────────────────────────
 
     async def confirm_order(self) -> bool:
+        clicked = False
         for sel in [
             'button:has-text("Подтвердить заказ")',
             'input[value="Подтвердить заказ"]',
@@ -339,12 +340,44 @@ class WaterOrderer:
             btn = self.page.locator(sel).first
             if await btn.count():
                 await btn.click()
-                await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-                await self._shot("order_placed")
-                return True
+                clicked = True
+                log.info(f"Confirm button clicked: {sel}")
+                break
 
-        await self._shot("confirm_button_not_found")
-        return False
+        if not clicked:
+            await self._shot("confirm_button_not_found")
+            return False
+
+        try:
+            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+
+        await self.page.wait_for_timeout(1500)
+        await self._shot("order_result")
+
+        url = self.page.url
+
+        # Still on the order form page = not confirmed
+        if url.rstrip("/#").endswith("/shop/order"):
+            log.warning(f"Still on order page after confirm: {url}")
+            return False
+
+        # Check page body for error signs
+        try:
+            body = (await self.page.inner_text("body")).lower()
+            if "http error 500" in body or "500 internal" in body:
+                log.warning("Server returned HTTP 500 after confirm")
+                return False
+            if any(w in body for w in ["спасибо", "заказ оформлен", "заказ принят", "ваш заказ"]):
+                log.info("Success text found on page")
+                return True
+        except Exception:
+            pass
+
+        # If URL changed away from order form — treat as success
+        log.info(f"Order confirm result URL: {url}")
+        return True
 
 
 # ── date parser (used for voice/text commands) ─────────────────────────────
