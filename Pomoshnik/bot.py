@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import tempfile
-import aiohttp
+import requests as _requests
 
 _TMP = tempfile.gettempdir()
 from aiogram import Bot, Dispatcher, F
@@ -183,11 +183,15 @@ async def _handle_voice_input(message: Message, state: FSMContext):
     tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
     tmp.close()
     try:
-        # trust_env=False — игнорируем SOCKS-прокси из окружения
-        async with aiohttp.ClientSession(trust_env=False) as sess:
-            async with sess.get(url) as resp:
-                with open(tmp.name, "wb") as f:
-                    f.write(await resp.read())
+        # requests с proxies={} — полностью обходим SOCKS-прокси
+        def _download():
+            r = _requests.get(url, proxies={"http": None, "https": None}, timeout=30)
+            r.raise_for_status()
+            with open(tmp.name, "wb") as f:
+                f.write(r.content)
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _download)
         text = await transcribe(tmp.name)
     except Exception as e:
         await status.edit_text(f"❌ Не удалось распознать голос: {str(e)[:200]}")
