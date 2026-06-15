@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, CallbackQuery,
+    Message, CallbackQuery, FSInputFile,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
@@ -364,6 +364,15 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
                 "✅ <b>Заказ оформлен!</b>\n\nВода едет к тебе 💧",
                 parse_mode="HTML",
             )
+            shot_path = os.path.join(_TMP, "water_order_result.png")
+            if os.path.exists(shot_path):
+                try:
+                    await callback.message.answer_photo(
+                        FSInputFile(shot_path),
+                        caption="📸 Страница подтверждения заказа",
+                    )
+                except Exception:
+                    log.exception("Не удалось отправить скриншот подтверждения")
         else:
             await callback.message.edit_text(
                 "⚠️ Не нашёл кнопку подтверждения.\n"
