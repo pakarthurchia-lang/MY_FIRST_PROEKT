@@ -178,11 +178,12 @@ async def _do_set_bottles(message: Message, state: FSMContext, text: str):
 async def _handle_voice_input(message: Message, state: FSMContext):
     status = await message.answer("🎙 Распознаю…")
 
-    file = await bot.get_file(message.voice.file_id)
-    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
     tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
     tmp.close()
     try:
+        file = await bot.get_file(message.voice.file_id)
+        url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+
         # requests с proxies={} — полностью обходим SOCKS-прокси
         def _download():
             r = _requests.get(url, proxies={"http": None, "https": None}, timeout=30)
@@ -194,6 +195,7 @@ async def _handle_voice_input(message: Message, state: FSMContext):
         await loop.run_in_executor(None, _download)
         text = await transcribe(tmp.name)
     except Exception as e:
+        log.exception("Voice download/transcribe failed")
         await status.edit_text(f"❌ Не удалось распознать голос: {str(e)[:200]}")
         return
     finally:
