@@ -6,8 +6,20 @@ Requires: pip install faster-whisper
 """
 
 import re
+import os
 import asyncio
 import logging
+import urllib.request
+
+# Windows читает системный SOCKS4-прокси (VPN-клиент) из реестра через
+# urllib.request.getproxies(), и httpx (используется huggingface_hub при
+# первой проверке модели) не умеет работать со схемой socks4 — падает с
+# "Unknown scheme for proxy URL". Отключаем определение прокси полностью.
+urllib.request.getproxies = lambda: {}
+for _v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_v, None)
+os.environ["NO_PROXY"] = "*"
+
 from faster_whisper import WhisperModel
 from products import find_product
 
