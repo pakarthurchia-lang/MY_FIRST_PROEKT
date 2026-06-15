@@ -64,10 +64,11 @@ def _slots_keyboard(slots: list[dict]) -> InlineKeyboardMarkup:
 
 
 def _confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить заказ", callback_data="confirm"),
-        InlineKeyboardButton(text="❌ Отменить",          callback_data="cancel"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить заказ", callback_data="confirm")],
+        [InlineKeyboardButton(text="↩ Другая дата/время", callback_data="back_to_slots")],
+        [InlineKeyboardButton(text="❌ Отменить",          callback_data="cancel")],
+    ])
 
 
 # ── core Playwright flow ────────────────────────────────────────────────────
@@ -297,6 +298,29 @@ async def handle_slot(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(f"❌ Ошибка: {e}")
         await _close_session(user_id)
         await state.clear()
+
+
+@dp.callback_query(WaterOrder.confirm, F.data == "back_to_slots")
+async def handle_back_to_slots(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    slots = data.get("slots", [])
+    product_key = data.get("product_key", DEFAULT_PRODUCT)
+    product_name = CATALOG[product_key]["name"]
+    qty = data.get("qty", 1)
+
+    if not slots:
+        await callback.message.edit_text("❌ Слоты не найдены. Начни заново: /water")
+        await state.clear()
+        return
+
+    await state.set_state(WaterOrder.choosing_slot)
+    await callback.message.edit_text(
+        f"🛒 <b>«{product_name}» × {qty} шт.</b>\n\n"
+        "📅 Выбери дату и время доставки:",
+        parse_mode="HTML",
+        reply_markup=_slots_keyboard(slots),
+    )
 
 
 @dp.callback_query(WaterOrder.confirm, F.data == "confirm")
