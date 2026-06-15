@@ -332,9 +332,10 @@ class WaterOrderer:
     async def confirm_order(self) -> bool:
         clicked = False
         for sel in [
+            '.js-submit-order-button',
+            'button[data-action="create"]',
+            'button.wa-submit-button',
             'button:has-text("Подтвердить заказ")',
-            'input[value="Подтвердить заказ"]',
-            'button[type="submit"]:has-text("Подтвердить")',
             '.js-submit-order',
         ]:
             btn = self.page.locator(sel).first
