@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import tempfile
+import aiohttp
 
 _TMP = tempfile.gettempdir()
 from aiogram import Bot, Dispatcher, F
@@ -178,13 +179,18 @@ async def _handle_voice_input(message: Message, state: FSMContext):
     status = await message.answer("🎙 Распознаю…")
 
     file = await bot.get_file(message.voice.file_id)
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
     tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
     tmp.close()
     try:
-        await bot.download_file(file.file_path, destination=tmp.name)
+        # trust_env=False — игнорируем SOCKS-прокси из окружения
+        async with aiohttp.ClientSession(trust_env=False) as sess:
+            async with sess.get(url) as resp:
+                with open(tmp.name, "wb") as f:
+                    f.write(await resp.read())
         text = await transcribe(tmp.name)
     except Exception as e:
-        await status.edit_text(f"❌ Не удалось распознать голос: {e}")
+        await status.edit_text(f"❌ Не удалось распознать голос: {str(e)[:200]}")
         return
     finally:
         os.unlink(tmp.name)
