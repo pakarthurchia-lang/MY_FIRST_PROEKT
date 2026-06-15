@@ -21,7 +21,7 @@ from aiogram.types import (
 )
 
 from config import BOT_TOKEN, WATER_LOGIN, WATER_PASSWORD, WATER_CITY, WATER_HEADLESS
-from water import WaterOrderer
+from water import WaterOrderer, parse_date
 from voice import transcribe, parse_water_command
 from products import CATALOG, DEFAULT_PRODUCT, find_product
 
@@ -107,6 +107,15 @@ async def _launch_and_get_slots(message: Message, state: FSMContext):
         await status_msg.edit_text("📅 Читаю доступные даты доставки…")
         slots = await orderer.get_delivery_slots()
 
+        # If user named a date in voice — show only that day's slots
+        voice_date = data.get("voice_date")
+        if voice_date and slots:
+            target_str = parse_date(voice_date).strftime("%d.%m.%Y")
+            filtered = [s for s in slots if s["date_str"] == target_str]
+            if filtered:
+                slots = filtered
+                log.info(f"Voice date '{voice_date}' → filtered to {len(slots)} slots")
+
         if not slots:
             await status_msg.edit_text(
                 "⚠️ Не нашёл доступные даты доставки.\n"
@@ -184,29 +193,29 @@ async def _handle_voice_input(message: Message, state: FSMContext):
 
     current = await state.get_state()
 
-    if current == WaterOrder.bottles.state:
+    if current in (WaterOrder.bottles.state, None):
+        # Parse everything from voice — qty, product, date
         parsed = parse_water_command(text)
-        await _do_set_bottles(message, state, str(parsed["qty"]))
+        product = parsed["product"]
 
-    elif current == WaterOrder.choosing_slot.state:
-        # Голос во время выбора слота — игнорируем
-        await message.answer("Выбери вариант из списка выше 👆")
-
-    else:
-        # Нет активного заказа — разбираем команду целиком
-        parsed = parse_water_command(text)
         await _close_session(message.from_user.id)
         await state.clear()
         await state.set_state(WaterOrder.bottles)
+        await state.update_data(
+            qty=parsed["qty"],
+            product_key=parsed["product_key"],
+            voice_date=parsed["date"],
+        )
 
-        product = parsed["product"]
-        await state.update_data(qty=parsed["qty"], product_key=parsed["product_key"])
-
+        date_hint = f" на {parsed['date']}" if parsed["date"] else ""
         await message.answer(
-            f"💧 «{product['name']}» × {parsed['qty']} шт. — понял. Ищу даты…",
+            f"💧 «{product['name']}» × {parsed['qty']} шт.{date_hint} — понял. Ищу даты…",
             parse_mode="HTML",
         )
         await _launch_and_get_slots(message, state)
+
+    elif current == WaterOrder.choosing_slot.state:
+        await message.answer("Выбери вариант из списка выше 👆")
 
 
 # ── Telegram handlers ──────────────────────────────────────────────────────
@@ -234,10 +243,11 @@ async def water_nlp(message: Message, state: FSMContext):
     await state.set_state(WaterOrder.bottles)
 
     product = parsed["product"]
-    await state.update_data(qty=parsed["qty"], product_key=parsed["product_key"])
+    date_hint = f" на {parsed['date']}" if parsed["date"] else ""
+    await state.update_data(qty=parsed["qty"], product_key=parsed["product_key"], voice_date=parsed["date"])
 
     await message.answer(
-        f"💧 «{product['name']}» × {parsed['qty']} шт. — понял. Ищу даты…",
+        f"💧 «{product['name']}» × {parsed['qty']} шт.{date_hint} — понял. Ищу даты…",
         parse_mode="HTML",
     )
     await _launch_and_get_slots(message, state)
