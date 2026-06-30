@@ -346,6 +346,10 @@ class WaterOrderer:
 
         self.page.on("response", _capture)
 
+        # Scroll to bottom where the confirm button lives, wait for page to settle
+        await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await self.page.wait_for_timeout(1000)
+
         clicked = False
         for sel in [
             '.js-submit-order-button',
@@ -356,7 +360,11 @@ class WaterOrderer:
         ]:
             btn = self.page.locator(sel).first
             if await btn.count():
-                await btn.click()
+                # force=True skips scroll-into-view to avoid race with page's own scroll
+                try:
+                    await btn.click(force=True)
+                except Exception:
+                    await self.page.evaluate(f"document.querySelector('{sel}')?.dispatchEvent(new MouseEvent('click', {{bubbles:true, cancelable:true}}))")
                 clicked = True
                 log.info(f"Confirm button clicked: {sel}")
                 break
