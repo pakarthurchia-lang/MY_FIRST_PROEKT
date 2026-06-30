@@ -346,21 +346,32 @@ class WaterOrderer:
 
         self.page.on("response", _capture)
 
-        clicked = await self.page.evaluate("""
+        # Freeze all scrolling so Playwright's native click (isTrusted=true) lands on the button
+        await self.page.evaluate("""
             () => {
-                const btn = document.querySelector('.js-submit-order-button')
-                    || document.querySelector('button[data-action="create"]')
-                    || Array.from(document.querySelectorAll('button'))
-                         .find(b => b.innerText.includes('Подтвердить'));
-                if (!btn) return false;
-                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                return true;
+                window.__sw = window.scrollTo;
+                window.__si = Element.prototype.scrollIntoView;
+                window.scrollTo = () => {};
+                Element.prototype.scrollIntoView = () => {};
+                document.documentElement.style.overflow = 'hidden';
             }
         """)
-        if clicked:
-            log.info("Confirm button clicked via JS")
-        else:
-            log.warning("Confirm button not found via JS")
+        try:
+            btn = self.page.locator('.js-submit-order-button').first
+            clicked = bool(await btn.count())
+            if clicked:
+                await btn.click()
+                log.info("Confirm button clicked (scroll frozen)")
+            else:
+                log.warning("Confirm button not found")
+        finally:
+            await self.page.evaluate("""
+                () => {
+                    window.scrollTo = window.__sw;
+                    Element.prototype.scrollIntoView = window.__si;
+                    document.documentElement.style.overflow = '';
+                }
+            """)
 
         if not clicked:
             await self._shot("confirm_button_not_found")
