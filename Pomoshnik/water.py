@@ -330,6 +330,14 @@ class WaterOrderer:
     # ── 5. confirm order ───────────────────────────────────────────────────
 
     async def confirm_order(self) -> bool:
+        buttons = await self.page.evaluate("""
+            () => Array.from(document.querySelectorAll('button, input[type=submit]')).map(b => ({
+                tag: b.tagName, text: b.innerText?.trim(), cls: b.className,
+                type: b.type, action: b.dataset?.action, id: b.id
+            }))
+        """)
+        log.info(f"Buttons on page: {buttons}")
+
         clicked = False
         for sel in [
             '.js-submit-order-button',
@@ -361,7 +369,16 @@ class WaterOrderer:
 
         # Still on the order form page = not confirmed
         if url.rstrip("/#").endswith("/shop/order"):
-            log.warning(f"Still on order page after confirm: {url}")
+            errors = await self.page.evaluate("""
+                () => Array.from(document.querySelectorAll('.wa-error, .error, .field-error, .alert-danger, .wa-form-error'))
+                    .map(e => e.innerText.trim()).filter(t => t)
+            """)
+            empty = await self.page.evaluate("""
+                () => Array.from(document.querySelectorAll('input[required], select[required]'))
+                    .filter(f => !f.value.trim())
+                    .map(f => f.name || f.placeholder || f.id)
+            """)
+            log.warning(f"Still on order page. Errors: {errors}. Empty required: {empty}")
             return False
 
         # Check page body for error signs
