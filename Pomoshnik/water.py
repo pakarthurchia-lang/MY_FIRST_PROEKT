@@ -346,6 +346,19 @@ class WaterOrderer:
 
         self.page.on("response", _capture)
 
+        # Check any unchecked consent/agreement checkboxes
+        await self.page.evaluate("""
+            () => {
+                document.querySelectorAll('input[type=checkbox]').forEach(cb => {
+                    if (!cb.checked) {
+                        cb.checked = true;
+                        cb.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                });
+            }
+        """)
+        await self.page.wait_for_timeout(300)
+
         # Freeze all scrolling so Playwright's native click (isTrusted=true) lands on the button
         await self.page.evaluate("""
             () => {
