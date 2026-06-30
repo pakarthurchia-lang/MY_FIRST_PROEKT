@@ -346,32 +346,27 @@ class WaterOrderer:
 
         self.page.on("response", _capture)
 
-        # Scroll to bottom where the confirm button lives, wait for page to settle
-        await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await self.page.wait_for_timeout(1000)
-
-        clicked = False
-        for sel in [
-            '.js-submit-order-button',
-            'button[data-action="create"]',
-            'button.wa-submit-button',
-            'button:has-text("Подтвердить заказ")',
-            '.js-submit-order',
-        ]:
-            btn = self.page.locator(sel).first
-            if await btn.count():
-                # force=True skips scroll-into-view to avoid race with page's own scroll
-                try:
-                    await btn.click(force=True)
-                except Exception:
-                    await self.page.evaluate(f"document.querySelector('{sel}')?.dispatchEvent(new MouseEvent('click', {{bubbles:true, cancelable:true}}))")
-                clicked = True
-                log.info(f"Confirm button clicked: {sel}")
-                break
+        clicked = await self.page.evaluate("""
+            () => {
+                const btn = document.querySelector('.js-submit-order-button')
+                    || document.querySelector('button[data-action="create"]')
+                    || Array.from(document.querySelectorAll('button'))
+                         .find(b => b.innerText.includes('Подтвердить'));
+                if (!btn) return false;
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                return true;
+            }
+        """)
+        if clicked:
+            log.info("Confirm button clicked via JS")
+        else:
+            log.warning("Confirm button not found via JS")
 
         if not clicked:
             await self._shot("confirm_button_not_found")
             return False
+
+        await self.page.wait_for_timeout(3000)
 
         try:
             await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
